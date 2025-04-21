@@ -10,7 +10,9 @@ ext_modules = [
 ]
 
 setup(
-    name="dart_bridge",
-    ext_modules=cythonize(ext_modules),
+    name="dart-bridge",
+    version="0.1.0",
+    description="A Cython bridge for interacting with the Dart SDK from Python",
+    ext_modules=cythonize(ext_modules, language_level=3),
     zip_safe=False,
 )

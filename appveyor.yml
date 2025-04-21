@@ -1,0 +1,18 @@
+version: 0.1.0.{build}
+image: Visual Studio 2022
+
+environment:
+  CIBW_SKIP: "* -cp310-win_amd64"  # Skip everything EXCEPT cp310 for Windows
+  CIBW_ARCHS_WINDOWS: AMD64
+  CIBW_BUILD: cp310-win_amd64
+  CIBW_TEST_SKIP: "*"
+
+install:
+  - python -m pip install --upgrade pip
+  - pip install cibuildwheel
+
+build_script:
+  - cibuildwheel --output-dir dist
+
+artifacts:
+  - path: dist\*

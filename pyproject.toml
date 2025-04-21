@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=61.0.0", "wheel", "cython"]
+requires = ["setuptools>=61.0.0", "wheel", "cython", "cibuildwheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -29,3 +29,15 @@ keywords = ["dart", "ffi", "bridge", "cython"]
 [project.urls]
 Homepage = "https://github.com/yourusername/dart_bridge_cython"  # Replace with your repo URL
 Issues = "https://github.com/yourusername/dart_bridge_cython/issues"  # Replace with your issue tracker URL
+
+[tool.cibuildwheel]
+skip = "pp* cp36* cp37* cp38* cp39*"
+
+[tool.cibuildwheel.macos]
+archs = ["x86_64", "arm64"]
+
+[tool.cibuildwheel.linux]
+manylinux-x86_64-image = "manylinux2014"
+
+[tool.cibuildwheel.windows]
+archs = ["AMD64"]
