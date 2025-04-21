@@ -35,7 +35,7 @@ environment:
       CIBW_BUILD: cp310-*
       CIBW_ARCHS_LINUX: arm64
 
-stack: python 3.11
+stack: python 3.10
 
 for:
   #
