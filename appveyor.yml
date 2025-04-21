@@ -1,18 +1,71 @@
 version: 0.1.0.{build}
-image: Visual Studio 2022
 
 environment:
-  #CIBW_SKIP: "* -cp310-win_amd64"  # Skip everything EXCEPT cp310 for Windows
-  CIBW_ARCHS_WINDOWS: AMD64
-  CIBW_BUILD: cp310-win_amd64
+  GITHUB_TOKEN:
+    secure: 9SKIwc3VSfYJ5IChvNR74hQprJ0DRmcV9pPX+8KyE6IXIdfMsX6ikeUmMhJGRu3ztkZaF45jmU7Xn/6tauXQXhDBxK1N8kFHFSAnq6LjUXyhS0TZKX/H+jDozBeVbCXp
+  TWINE_USERNAME: __token__
+  TWINE_PASSWORD:
+    secure: 174ncAbF5IjSIkmioPt62jeSnzmTlRNchUkE4QdjDWH8xK1olYtySXLJpo2q95HcP7lWJky1hv4APESiRRHnBWoY0XRFafzM/mbCDMzG1tZXiXZmpP1qzHAtRP2QSCIg18xh1TMktraUdTi7sbJnjjRhqzgbW1k0kLBxKw79MPFBhYQ/TiGcmaYWZbWVZNY3HCUCb6Dt7bG1OE2Ul9rD1gvs55xwO9Oq9FOVA1VnMYw=
+  TWINE_NON_INTERACTIVE: true
+  GEMFURY_TOKEN:
+    secure: trYGM65OQ1+HYnOYOe/NOHrofLpP3bz64nHwVWPJhiUIYll3MrrQd7ilFNp+zSkI
   CIBW_TEST_SKIP: "*"
 
-install:
-  - python -m pip install --upgrade pip
-  - pip install cibuildwheel
+  matrix:
+    - job_name: Windows build
+      APPVEYOR_BUILD_WORKER_IMAGE: Visual Studio 2022
+      CIBW_ARCHS_WINDOWS: AMD64
+      CIBW_BUILD: cp310-win_amd64
 
-build_script:
-  - cibuildwheel --output-dir dist
+    - job_name: macOS build
+      job_group: nix
+      APPVEYOR_BUILD_WORKER_IMAGE: macos-monterey
+      CIBW_BUILD: cp310-*
+      CIBW_ARCHS_MACOS: x86_64 arm64
 
-artifacts:
-  - path: dist\*
+    - job_name: Linux build
+      job_group: nix
+      APPVEYOR_BUILD_WORKER_IMAGE: ubuntu2004
+      CIBW_BUILD: cp310-*
+      CIBW_ARCHS_LINUX: x86_64
+
+    - job_name: Linux arm64 build
+      job_group: nix
+      APPVEYOR_BUILD_WORKER_IMAGE: ubuntu2004-arm
+      CIBW_BUILD: cp310-*
+      CIBW_ARCHS_LINUX: arm64
+
+for:
+  #
+  #   Windows
+  #
+  - matrix:
+      only:
+        - job_name: Windows build
+
+    install:
+      - python -m pip install --upgrade pip
+      - pip install cibuildwheel
+
+    build_script:
+      - cibuildwheel --output-dir dist
+
+    artifacts:
+      - path: dist\*
+
+  #
+  #   macOS/Linux
+  #
+  - matrix:
+      only:
+        - job_group: nix
+
+    install:
+      - python3 -m pip install --upgrade pip
+      - pip3 install cibuildwheel
+
+    build_script:
+      - cibuildwheel --output-dir dist
+
+    artifacts:
+      - path: dist/*.whl
