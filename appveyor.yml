@@ -33,7 +33,7 @@ environment:
       job_group: nix
       APPVEYOR_BUILD_WORKER_IMAGE: ubuntu2004-arm
       CIBW_BUILD: cp310-*
-      CIBW_ARCHS_LINUX: arm64
+      CIBW_ARCHS_LINUX: aarch64
 
 stack: python 3.10
 
