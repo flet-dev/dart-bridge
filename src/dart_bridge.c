@@ -3,6 +3,55 @@
 #include <stdint.h>
 #include "dart_api/dart_api_dl.h"
 
+PyObject* global_enqueue_handler_func = NULL;
+
+static PyObject* set_enqueue_handler_func(PyObject* self, PyObject* args) {
+    PyObject* func;
+
+    if (!PyArg_ParseTuple(args, "O:set_enqueue_handler_func", &func)) {
+        return NULL;
+    }
+
+    if (!PyCallable_Check(func)) {
+        PyErr_SetString(PyExc_TypeError, "parameter must be callable");
+        return NULL;
+    }
+
+    Py_XINCREF(func);
+    Py_XDECREF(global_enqueue_handler_func);
+    global_enqueue_handler_func = func;
+
+    Py_RETURN_NONE;
+}
+
+void DartBridge_EnqueueMessage(const char* data, size_t len) {
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    if (!global_enqueue_handler_func) {
+        fprintf(stderr, "[dart_bridge.c] global_enqueue_handler_func is NULL\n");
+        PyGILState_Release(gstate);
+        return;
+    }
+
+    PyObject* arg = PyBytes_FromStringAndSize(data, len);
+    if (!arg) {
+        PyErr_Print();
+        fprintf(stderr, "[dart_bridge.c] Failed to create PyBytes\n");
+        PyGILState_Release(gstate);
+        return;
+    }
+
+    PyObject* result = PyObject_CallFunctionObjArgs(global_enqueue_handler_func, arg, NULL);
+    if (!result) {
+        PyErr_Print();
+        fprintf(stderr, "[dart_bridge.c] global_enqueue_handler_func call failed\n");
+    }
+
+    Py_XDECREF(arg);
+    Py_XDECREF(result);
+    PyGILState_Release(gstate);
+}
+
 static Dart_Port dart_port = 0;
 
 // called from Dart via FFI
@@ -46,6 +95,7 @@ static PyObject* send_bytes(PyObject* self, PyObject* args) {
 
 static PyMethodDef methods[] = {
   {"send_bytes", send_bytes, METH_VARARGS, "Send bytes to Dart"},
+  {"set_enqueue_handler_func", set_enqueue_handler_func, METH_VARARGS, "Set the Python handler for C callbacks."},
   {NULL, NULL, 0, NULL}
 };
 
