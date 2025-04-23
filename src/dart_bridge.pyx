@@ -1,6 +1,8 @@
 # cython: language_level=3
 
 from libc.stdint cimport int64_t
+from libc.stdint cimport intptr_t
+
 from cpython.bytes cimport PyBytes_AsStringAndSize
 
 cdef extern from "dart_api_stub.h":
@@ -26,6 +28,12 @@ cdef extern from "dart_api_stub.h":
         Dart_CObject_Value value
 
     bint Dart_PostCObject_DL(Dart_Port port_id, Dart_CObject* message)
+
+cdef extern from "dart_api_dl.h":
+    intptr_t Dart_InitializeApiDL(void* data)
+
+cdef public long InitDartApiDL(void* data):
+    return Dart_InitializeApiDL(data)
 
 # Global variable to store Dart port
 cdef Dart_Port _dart_port = 0

@@ -4,7 +4,11 @@ from setuptools import Extension, setup
 ext_modules = [
     Extension(
         name="dart_bridge",
-        sources=["src/dart_bridge.pyx", "src/dart_stub.c"],
+        sources=[
+            "src/dart_bridge.pyx",
+            "src/dart_stub.c",
+            "src/dart_api/dart_api_dl.c",
+        ],
         include_dirs=["src/dart_api"],
     )
 ]
