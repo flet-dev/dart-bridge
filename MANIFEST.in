@@ -1,0 +1,3 @@
+include README.md
+include src/dart_api/*.h
+include src/dart_api/*.c
