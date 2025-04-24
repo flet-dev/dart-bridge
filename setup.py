@@ -14,30 +14,6 @@ class bdist_wheel_abi3(bdist_wheel):
 
 
 setup(
-    name="dart-bridge",
-    version="0.3.0",
-    description="A Python C extension for interacting with the Dart SDK from Python",
-    long_description=open("README.md").read(),
-    long_description_content_type="text/markdown",
-    author="Flet Team",
-    author_email="hello@flet.dev",
-    url="https://github.com/flet-dev/dart-bridge",
-    project_urls={
-        "Homepage": "https://github.com/flet-dev/dart-bridge",
-        "Issues": "https://github.com/flet-dev/dart-bridge/issues",
-    },
-    classifiers=[
-        "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.10",
-        "Programming Language :: Python :: 3.11",
-        "Programming Language :: Python :: 3.12",
-        "Programming Language :: C",
-        "Programming Language :: Cython",
-        "Operating System :: OS Independent",
-        "Topic :: Software Development :: Libraries :: Python Modules",
-    ],
-    keywords="dart ffi bridge cython",
-    python_requires=">=3.10",
     ext_modules=[
         Extension(
             "dart_bridge",
