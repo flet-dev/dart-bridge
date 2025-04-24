@@ -3,19 +3,16 @@ requires = ["setuptools>=61.0.0", "wheel", "cython", "cibuildwheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "dart-bridge" 
+name = "dart-bridge"
 version = "0.1.0"
-description = "A Cython bridge for interacting with the Dart SDK from Python"
+description = "A Python C extension for interacting with the Dart SDK from Python"
 readme = "README.md"
 authors = [
-    { name = "Your Name", email = "your.email@example.com" },
+    { name = "Flet Team", email = "hello@flet.dev" },
 ]
-requires-python = ">=3.7"
+requires-python = ">=3.10"
 classifiers = [
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.7",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -27,17 +24,5 @@ classifiers = [
 keywords = ["dart", "ffi", "bridge", "cython"]
 
 [project.urls]
-Homepage = "https://github.com/yourusername/dart_bridge_cython"  # Replace with your repo URL
-Issues = "https://github.com/yourusername/dart_bridge_cython/issues"  # Replace with your issue tracker URL
-
-[tool.cibuildwheel]
-skip = "pp* cp36* cp37* cp38* cp39*"
-
-[tool.cibuildwheel.macos]
-archs = ["x86_64", "arm64"]
-
-[tool.cibuildwheel.linux]
-manylinux-x86_64-image = "manylinux2014"
-
-[tool.cibuildwheel.windows]
-archs = ["AMD64"]
+Homepage = "https://github.com/flet-dev/dart-bridge"
+Issues = "https://github.com/flet-dev/dart-bridge/issues"

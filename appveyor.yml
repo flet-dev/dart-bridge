@@ -47,13 +47,25 @@ for:
 
     install:
       - python -m pip install --upgrade pip
-      - pip install cibuildwheel
+      - pip install cibuildwheel build wheel
 
     build_script:
       - cibuildwheel --output-dir dist
+      - python -m build --sdist
 
     artifacts:
       - path: dist\*
+
+    deploy_script:
+      - ps: |
+          if (($env:APPVEYOR_REPO_BRANCH -eq "main" -or $env:APPVEYOR_REPO_TAG_NAME) -and (-not $env:APPVEYOR_PULL_REQUEST_NUMBER)) {
+              twine upload dist\*
+          } elseif (-not $env:APPVEYOR_PULL_REQUEST_NUMBER) {
+            $wheels = (Get-ChildItem dist/*.whl | Select-Object -ExpandProperty FullName)
+            foreach ($wheel in $wheels) {
+                curl.exe -sF package=@$wheel https://$env:GEMFURY_TOKEN@push.fury.io/flet/
+            }
+          }
 
   #
   #   macOS/Linux
@@ -63,6 +75,7 @@ for:
         - job_group: nix
 
     install:
+      - source .ci/common.sh
       - python --version
       - pip install --upgrade cibuildwheel
       - export PATH="$HOME/.local/bin:$PATH"
@@ -72,3 +85,6 @@ for:
 
     artifacts:
       - path: dist/*.whl
+
+    deploy_script:
+      - publish_to_pypi dist/*.whl
