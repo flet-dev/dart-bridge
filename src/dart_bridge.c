@@ -2,6 +2,108 @@
 #include <Python.h>
 #include <stdint.h>
 #include "dart_api/dart_api_dl.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#if defined(_WIN32)
+#include <windows.h>
+#define EXPORT __declspec(dllexport)
+#define SET_ENV(key, value) _putenv_s(key, value)
+#else
+#include <pthread.h>
+#include <unistd.h>
+#define EXPORT __attribute__((visibility("default")))
+#define SET_ENV(key, value) setenv(key, value, 1)
+#endif
+
+typedef struct {
+    const char* appPath;
+    const char* script;
+    const char** modulePaths;
+    int modulePathsCount;
+    const char** envKeys;
+    const char** envValues;
+    int envCount;
+    int sync;  // 1 = sync, 0 = async (threaded)
+} DartBridgeRunArgs;
+
+void run_python(DartBridgeRunArgs* args) {
+    // Set environment variables
+    for (int i = 0; i < args->envCount; i++) {
+        SET_ENV(args->envKeys[i], args->envValues[i]);
+    }
+
+    // Build PYTHONPATH
+    if (args->modulePathsCount > 0) {
+        size_t total_len = 0;
+        const char sep =
+#if defined(_WIN32)
+            ';';
+#else
+            ':';
+#endif
+        for (int i = 0; i < args->modulePathsCount; i++) {
+            total_len += strlen(args->modulePaths[i]) + 1;
+        }
+        char* pythonpath = malloc(total_len);
+        pythonpath[0] = '\0';
+        for (int i = 0; i < args->modulePathsCount; i++) {
+            strcat(pythonpath, args->modulePaths[i]);
+            if (i < args->modulePathsCount - 1) {
+                size_t len = strlen(pythonpath);
+                pythonpath[len] = sep;
+                pythonpath[len + 1] = '\0';
+            }
+        }
+        SET_ENV("PYTHONPATH", pythonpath);
+        free(pythonpath);
+    }
+
+    Py_Initialize();
+
+    if (args->script && strlen(args->script) > 0) {
+        PyRun_SimpleString(args->script);
+    } else if (args->appPath) {
+        FILE* file = fopen(args->appPath, "rb");
+        if (file) {
+            PyRun_SimpleFileEx(file, args->appPath, 1);  // 1 = close file
+        } else {
+            fprintf(stderr, "Failed to open Python file: %s\n", args->appPath);
+        }
+    }
+
+    if (args->sync) {
+        Py_Finalize();
+    }
+}
+
+#if defined(_WIN32)
+#include <process.h>
+unsigned __stdcall python_thread_main(void* arg) {
+    run_python((DartBridgeRunArgs*)arg);
+    return 0;
+}
+#else
+void* python_thread_main(void* arg) {
+    run_python((DartBridgeRunArgs*)arg);
+    return NULL;
+}
+#endif
+
+EXPORT void DartBridge_RunPython(DartBridgeRunArgs* args) {
+    if (args->sync) {
+        run_python(args);
+    } else {
+#if defined(_WIN32)
+        _beginthreadex(NULL, 0, python_thread_main, args, 0, NULL);
+#else
+        pthread_t thread;
+        pthread_create(&thread, NULL, python_thread_main, args);
+        pthread_detach(thread);
+#endif
+    }
+}
 
 PyObject* global_enqueue_handler_func = NULL;
 
