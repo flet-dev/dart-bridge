@@ -15,24 +15,24 @@ environment:
     - job_name: Windows build
       APPVEYOR_BUILD_WORKER_IMAGE: Visual Studio 2022
       CIBW_ARCHS_WINDOWS: AMD64
-      CIBW_BUILD: cp310-win_amd64
+      CIBW_BUILD: cp312-win_amd64
 
     - job_name: macOS build
       job_group: nix
       APPVEYOR_BUILD_WORKER_IMAGE: macos-monterey
-      CIBW_BUILD: cp310-*
+      CIBW_BUILD: cp312-*
       CIBW_ARCHS_MACOS: x86_64 arm64
 
     - job_name: Linux build
       job_group: nix
       APPVEYOR_BUILD_WORKER_IMAGE: ubuntu2004
-      CIBW_BUILD: cp310-*
+      CIBW_BUILD: cp312-*
       CIBW_ARCHS_LINUX: x86_64
 
     - job_name: Linux arm64 build
       job_group: nix
       APPVEYOR_BUILD_WORKER_IMAGE: ubuntu2004-arm
-      CIBW_BUILD: cp310-*
+      CIBW_BUILD: cp312-*
       CIBW_ARCHS_LINUX: aarch64
 
 stack: python 3.10
