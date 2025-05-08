@@ -92,6 +92,9 @@ void* python_thread_main(void* arg) {
 #endif
 
 // called from Dart via FFI
+#ifdef _WIN32
+__declspec(dllexport)
+#endif
 EXPORT void DartBridge_RunPython(DartBridgeRunArgs* args) {
     if (args->sync) {
         run_python(args);
@@ -129,6 +132,9 @@ static PyObject* set_enqueue_handler_func(PyObject* self, PyObject* args) {
 }
 
 // called from Dart via FFI
+#ifdef _WIN32
+__declspec(dllexport)
+#endif
 void DartBridge_EnqueueMessage(const char* data, size_t len) {
     PyGILState_STATE gstate = PyGILState_Ensure();
 
@@ -158,6 +164,9 @@ void DartBridge_EnqueueMessage(const char* data, size_t len) {
 }
 
 // called from Dart via FFI
+#ifdef _WIN32
+__declspec(dllexport)
+#endif
 intptr_t DartBridge_InitDartApiDL(void* data) {
   return Dart_InitializeApiDL(data);
 }
