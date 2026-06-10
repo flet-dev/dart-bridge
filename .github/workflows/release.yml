@@ -105,6 +105,7 @@ jobs:
           CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/${TARGET}21-clang"
           INCLUDE_DIR=$(find pydist -path "*/include/python3.*" -type d | head -n1)
           LIBPYTHON=$(find pydist -name libpython3.so | head -n1)
+          LIBPYTHON_DIR=$(dirname "$LIBPYTHON")
           mkdir -p dist
           OUT="dist/libdart_bridge-android-${ABI}.so"
           $CC -shared -fPIC -fvisibility=hidden \
@@ -112,6 +113,7 @@ jobs:
             -DPy_LIMITED_API=0x030c0000 \
             -I "$INCLUDE_DIR" -I src \
             src/dart_bridge.c src/dart_api/dart_api_dl.c \
+            -L "$LIBPYTHON_DIR" \
             "$LIBPYTHON" -ldl \
             -Wl,-z,max-page-size=16384 \
             -o "$OUT"

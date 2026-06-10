@@ -157,14 +157,19 @@ jobs:
           mkdir -p dist
           OUT="dist/libdart_bridge-android-${ABI}.so"
 
-          # Link the abi3 stub (libpython3.so) — DT_NEEDED resolves at runtime
-          # against whatever libpython3.<X>.so the consuming app has loaded.
+          # Link the abi3 stub (libpython3.so). It has DT_NEEDED on the
+          # version-specific libpython3.<X>.so; -L the same lib dir so the
+          # linker can satisfy that dependency at link time. At runtime, the
+          # consuming app loads its own libpython3.<X>.so and the stub
+          # forwards calls there.
+          LIBPYTHON_DIR=$(dirname "$LIBPYTHON")
           $CC -shared -fPIC -fvisibility=hidden \
             -DDART_SHARED_LIB \
             -DPy_LIMITED_API=0x030c0000 \
             -I "$INCLUDE_DIR" \
             -I src \
             src/dart_bridge.c src/dart_api/dart_api_dl.c \
+            -L "$LIBPYTHON_DIR" \
             "$LIBPYTHON" \
             -ldl \
             -Wl,-z,max-page-size=16384 \
