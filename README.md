@@ -13,10 +13,14 @@ bridge transparently.
 ## What's in here
 
 - `src/dart_bridge.c` — single C source containing both the Dart-callable
-  surface (`DartBridge_InitDartApiDL`, `DartBridge_EnqueueMessage`) and the
-  Python built-in module (`PyInit_dart_bridge`, `set_enqueue_handler_func`,
-  `send_bytes`). Statically linked together — no dlsym/dlopen plumbing
-  needed because both halves share globals trivially.
+  surface (`DartBridge_InitDartApiDL`, `DartBridge_EnqueueMessage(port, ...)`)
+  and the Python built-in module (`PyInit_dart_bridge`,
+  `set_enqueue_handler_func(port, callable)`, `send_bytes(port, payload)`).
+  Statically linked together — no dlsym/dlopen plumbing needed because both
+  halves share the keyed handler list trivially. The 64-bit Dart native
+  port doubles as the channel key in both directions, so multiple
+  PythonBridge instances (UI channel + logging channel + ...) coexist
+  without colliding.
 - `src/serious_python_run.c` — Python lifecycle: `Py_Initialize`,
   `PyRun_SimpleFile` / `PyRun_SimpleString`, env / sys.argv setup, worker-
   thread execution. Lifted from the platform-specific implementations in
@@ -37,13 +41,17 @@ Every tagged release attaches the following artifacts:
 | Linux aarch64 | `libdart_bridge-linux-aarch64.so` |
 | Windows x86_64 (Release CRT) | `dart_bridge-windows-x86_64.dll` |
 | Windows x86_64 (Debug CRT) | `dart_bridge_d-windows-x86_64.dll` |
-| Android arm64-v8a | `libdart_bridge-android-arm64-v8a.so` |
-| Android armeabi-v7a | `libdart_bridge-android-armeabi-v7a.so` |
-| Android x86_64 | `libdart_bridge-android-x86_64.so` |
+| Android arm64-v8a / armeabi-v7a / x86_64 | `libdart_bridge-android-<abi>-py<ver>.so` |
 | Apple (iOS device + iOS sim + macOS) | `dart_bridge-apple.xcframework.zip` |
 
-abi3 (`Py_LIMITED_API=0x030c0000`) — one binary per `(platform × arch)` works
-for any CPython 3.12+. No per-Python-version matrix needed.
+abi3 (`Py_LIMITED_API=0x030c0000`) makes one binary work for any CPython
+3.12+ on Linux/Windows/Apple. Android is the exception: python-build-
+standalone ships `libpython3.so` as a GNU linker script that resolves to
+`libpython3.<ver>.so`, so the resulting `DT_NEEDED` entry is version-
+specific and we publish a binary per `(abi × python_version)`.
+
+armeabi-v7a is only published for Python 3.12 — CPython dropped 32-bit
+Android in 3.13+ (PEP 738).
 
 Download URL pattern:
 

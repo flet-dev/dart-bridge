@@ -92,6 +92,10 @@ static int sp_setenv(const char* k, const char* v) { return setenv(k, v, 1); }
 // PyInit_dart_bridge lives in dart_bridge.c, linked into the same binary.
 extern PyObject* PyInit_dart_bridge(void);
 
+// Release registered Dart→Python handler PyObjects before Py_Finalize. See
+// dart_bridge.c.
+extern void dart_bridge_clear_handlers(void);
+
 // ---------------------------------------------------------------------------
 // Public C API (mirrors the SeriousPythonRunConfig the Dart side builds)
 // ---------------------------------------------------------------------------
@@ -359,6 +363,7 @@ static int sp_run_python(sp_state_t* st) {
 
     int exit_code = sp_run_target(st);
 
+    dart_bridge_clear_handlers();
     Py_Finalize();
     return exit_code;
 }
@@ -434,6 +439,7 @@ EXPORT int serious_python_request_stop(void) {
 
 EXPORT void serious_python_finalize(void) {
     if (Py_IsInitialized()) {
+        dart_bridge_clear_handlers();
         Py_Finalize();
     }
 }
