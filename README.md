@@ -17,10 +17,14 @@ bridge transparently.
   Python built-in module (`PyInit_dart_bridge`, `set_enqueue_handler_func`,
   `send_bytes`). Statically linked together — no dlsym/dlopen plumbing
   needed because both halves share globals trivially.
-- `src/serious_python_run.c` (coming in v1.1) — Python lifecycle:
-  `Py_Initialize`, `PyRun_SimpleFile`, env / sys.argv setup, worker-thread
-  execution. Lifted from the platform-specific implementations in
-  `serious_python_{darwin,linux,windows,android}`.
+- `src/serious_python_run.c` — Python lifecycle: `Py_Initialize`,
+  `PyRun_SimpleFile` / `PyRun_SimpleString`, env / sys.argv setup, worker-
+  thread execution. Lifted from the platform-specific implementations in
+  `serious_python_{darwin,linux,windows,android}`. Exposes
+  `serious_python_run(config)` (sync or async via Dart port),
+  `serious_python_register_extension(name, init)` (additional inittab
+  entries beyond dart_bridge), `serious_python_request_stop()`,
+  `serious_python_finalize()`.
 - `src/dart_api/` — Dart SDK headers (vendored from the Dart SDK).
 
 ## Released binaries

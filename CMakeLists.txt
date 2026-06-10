@@ -35,6 +35,7 @@ endif()
 
 add_library(dart_bridge SHARED
   src/dart_bridge.c
+  src/serious_python_run.c
   src/dart_api/dart_api_dl.c
 )
 

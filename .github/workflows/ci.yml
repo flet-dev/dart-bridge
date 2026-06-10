@@ -95,7 +95,7 @@ jobs:
             $outName = 'dart_bridge-windows-x86_64.dll'
           }
 
-          $clCmd = "cl /nologo /LD $crt $debugDef /DDART_SHARED_LIB /DPy_LIMITED_API=0x030c0000 /I `"$includeDir`" /I src src\dart_bridge.c src\dart_api\dart_api_dl.c /link /LIBPATH:`"$libDir`" /OUT:`"$outDir\$outName`" `"$pyLib`""
+          $clCmd = "cl /nologo /LD $crt $debugDef /DDART_SHARED_LIB /DPy_LIMITED_API=0x030c0000 /I `"$includeDir`" /I src src\dart_bridge.c src\serious_python_run.c src\dart_api\dart_api_dl.c /link /LIBPATH:`"$libDir`" /OUT:`"$outDir\$outName`" `"$pyLib`""
           cmd /c "`"$vcvars`" >NUL && $clCmd"
 
           if (-not (Test-Path "$outDir\$outName")) {
@@ -170,7 +170,7 @@ jobs:
             -DPy_LIMITED_API=0x030c0000 \
             -I "$INCLUDE_DIR" \
             -I src \
-            src/dart_bridge.c src/dart_api/dart_api_dl.c \
+            src/dart_bridge.c src/serious_python_run.c src/dart_api/dart_api_dl.c \
             -L "$LIBPYTHON_DIR" \
             "$LIBPYTHON" \
             -ldl \

@@ -27,6 +27,7 @@ mkdir -p "$BUILD" "$DIST"
 
 SRC_FILES=(
   "$ROOT/src/dart_bridge.c"
+  "$ROOT/src/serious_python_run.c"
   "$ROOT/src/dart_api/dart_api_dl.c"
 )
 
