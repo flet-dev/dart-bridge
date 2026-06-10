@@ -17,7 +17,7 @@
 
 cmake_minimum_required(VERSION 3.15)
 
-project(dart_bridge VERSION 1.2.0 LANGUAGES C)
+project(dart_bridge VERSION 1.2.1 LANGUAGES C)
 
 if(NOT DEFINED DART_BRIDGE_PYTHON_INCLUDE_DIRS)
   find_package(Python3 REQUIRED COMPONENTS Development.Module)

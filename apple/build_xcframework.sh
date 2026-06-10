@@ -84,7 +84,13 @@ build_slice() {
     arch_archives+=("$arch_archive")
   done
 
-  local slice_archive="$BUILD/libdart_bridge-$sdk.a"
+  # CocoaPods rejects xcframeworks whose slices have differing library
+  # binary names ("contains static libraries with differing binary names").
+  # Stage each slice under its own subdir so xcodebuild -create-xcframework
+  # preserves a uniform `libdart_bridge.a` in every slice.
+  local slice_dir="$BUILD/$sdk"
+  mkdir -p "$slice_dir"
+  local slice_archive="$slice_dir/libdart_bridge.a"
   if [ "${#arch_archives[@]}" -eq 1 ]; then
     cp "${arch_archives[0]}" "$slice_archive"
   else
@@ -100,9 +106,9 @@ build_slice macosx arm64 x86_64
 
 echo "--- Creating xcframework ---"
 xcodebuild -create-xcframework \
-  -library "$BUILD/libdart_bridge-iphoneos.a" \
-  -library "$BUILD/libdart_bridge-iphonesimulator.a" \
-  -library "$BUILD/libdart_bridge-macosx.a" \
+  -library "$BUILD/iphoneos/libdart_bridge.a" \
+  -library "$BUILD/iphonesimulator/libdart_bridge.a" \
+  -library "$BUILD/macosx/libdart_bridge.a" \
   -output "$DIST/dart_bridge.xcframework"
 
 echo "--- Zipping artifact ---"
