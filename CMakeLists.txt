@@ -70,7 +70,18 @@ target_include_directories(dart_bridge PRIVATE
   ${DART_BRIDGE_PYTHON_INCLUDE_DIRS}
 )
 
-target_link_libraries(dart_bridge PRIVATE ${DART_BRIDGE_PYTHON_LIBRARIES})
+if(UNIX AND NOT APPLE AND NOT ANDROID)
+  # python-build-standalone's libpython3.so is an empty stub: it exports
+  # nothing — Py_* live in libpython3.X.so.1.0 — and exists only as a link
+  # target so projects that want a stable, version-agnostic DT_NEEDED entry
+  # can name it. GNU ld --as-needed (default on modern distros) drops it
+  # because no symbols from it are referenced. Wrap the link with
+  # --no-as-needed so DT_NEEDED records libpython3.so unconditionally.
+  target_link_libraries(dart_bridge PRIVATE
+    "-Wl,--no-as-needed,${DART_BRIDGE_PYTHON_LIBRARIES},--as-needed")
+else()
+  target_link_libraries(dart_bridge PRIVATE ${DART_BRIDGE_PYTHON_LIBRARIES})
+endif()
 
 set_target_properties(dart_bridge PROPERTIES
   C_VISIBILITY_PRESET hidden
