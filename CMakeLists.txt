@@ -113,3 +113,17 @@ if(ANDROID)
     LINK_FLAGS "-Wl,-z,max-page-size=16384"
   )
 endif()
+
+if(UNIX AND NOT APPLE AND NOT ANDROID)
+  # Linux: when libdart_bridge.so is dlopen()'d from a Flutter app at
+  # <app>/lib/libdart_bridge.so, its DT_NEEDED libpython3.so must resolve
+  # against the same lib/ dir. Modern Linux uses DT_RUNPATH (not the older
+  # DT_RPATH) for the consuming EXE, and RUNPATH does NOT apply to
+  # transitive dependencies — so the EXE's `$ORIGIN/lib` doesn't help
+  # libdart_bridge.so find its own siblings. Set $ORIGIN on libdart_bridge
+  # itself so its sibling libpython3.so is reachable. --disable-new-dtags
+  # forces DT_RPATH (which DOES apply transitively) instead of DT_RUNPATH.
+  target_link_options(dart_bridge PRIVATE
+    "LINKER:-rpath,$ORIGIN"
+    "LINKER:--disable-new-dtags")
+endif()
