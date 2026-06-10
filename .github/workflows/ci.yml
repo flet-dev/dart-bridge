@@ -127,9 +127,13 @@ jobs:
           curl -fL -o pamf.tar.gz \
             "https://github.com/flet-dev/python-build/releases/download/v${VER}/python-android-mobile-forge-${VER}.tar.gz"
           mkdir -p pydist
+          # libpython3.so is the abi3 stub but has DT_NEEDED on the version-
+          # specific libpython3.X.so. Extract both so the linker can resolve
+          # the stub's dependency at link time.
           tar -xzf pamf.tar.gz -C pydist --wildcards \
             "install/android/${{ matrix.abi }}/python-${VER}.*/include/" \
-            "install/android/${{ matrix.abi }}/python-${VER}.*/lib/libpython3.so"
+            "install/android/${{ matrix.abi }}/python-${VER}.*/lib/libpython3.so" \
+            "install/android/${{ matrix.abi }}/python-${VER}.*/lib/libpython${VER}.so"
           echo "Python.h:"; find pydist -name Python.h
           echo "libpython3.so (abi3 stub):"; find pydist -name libpython3.so
 

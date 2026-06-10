@@ -90,7 +90,8 @@ jobs:
           mkdir -p pydist
           tar -xzf pamf.tar.gz -C pydist --wildcards \
             "install/android/${{ matrix.abi }}/python-3.12.*/include/" \
-            "install/android/${{ matrix.abi }}/python-3.12.*/lib/libpython3.so"
+            "install/android/${{ matrix.abi }}/python-3.12.*/lib/libpython3.so" \
+            "install/android/${{ matrix.abi }}/python-3.12.*/lib/libpython3.12.so"
       - name: Cross-compile via NDK
         run: |
           set -euxo pipefail

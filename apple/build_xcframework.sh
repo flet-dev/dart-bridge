@@ -40,7 +40,6 @@ SRC_FILES=(
 build_slice() {
   local sdk="$1"; shift
   local archs=("$@")
-  local slice_objs=()
 
   echo "--- Building slice: $sdk (${archs[*]}) ---"
 
@@ -48,15 +47,25 @@ build_slice() {
   sdk_path=$(xcrun --sdk "$sdk" --show-sdk-path)
   local min_flag=""
   case "$sdk" in
-    iphoneos|iphonesimulator) min_flag="-mios-version-min=13.0" ;;
-    macosx) min_flag="-mmacosx-version-min=10.15" ;;
+    iphoneos)        min_flag="-mios-version-min=13.0" ;;
+    iphonesimulator) min_flag="-mios-simulator-version-min=13.0" ;;
+    macosx)          min_flag="-mmacosx-version-min=10.15" ;;
   esac
 
+  # For each arch, produce a per-arch static archive. xcframework slices
+  # must be either single-arch archives OR a single fat (lipo'd) archive
+  # per slice. libtool-static of multi-arch .o files in one archive
+  # produces a multi-platform archive that xcodebuild -create-xcframework
+  # rejects ("binaries with multiple platforms are not supported"), so we
+  # libtool per-arch and then lipo the per-arch archives into one fat .a.
+
+  local arch_archives=()
   for arch in "${archs[@]}"; do
+    local arch_objs=()
     for src in "${SRC_FILES[@]}"; do
       local name
       name=$(basename "$src" .c)
-      local out="$BUILD/$sdk-$arch-$name.o"
+      local obj="$BUILD/$sdk-$arch-$name.o"
       xcrun --sdk "$sdk" clang \
         -arch "$arch" \
         -isysroot "$sdk_path" \
@@ -66,14 +75,22 @@ build_slice() {
         -fvisibility=hidden \
         -I "$PYTHON_HEADERS_DIR" \
         -I "$ROOT/src" \
-        -c "$src" -o "$out"
-      slice_objs+=("$out")
+        -c "$src" -o "$obj"
+      arch_objs+=("$obj")
     done
+    local arch_archive="$BUILD/libdart_bridge-$sdk-$arch.a"
+    libtool -static -o "$arch_archive" "${arch_objs[@]}"
+    arch_archives+=("$arch_archive")
   done
 
   local slice_archive="$BUILD/libdart_bridge-$sdk.a"
-  libtool -static -o "$slice_archive" "${slice_objs[@]}"
+  if [ "${#arch_archives[@]}" -eq 1 ]; then
+    cp "${arch_archives[0]}" "$slice_archive"
+  else
+    lipo -create -output "$slice_archive" "${arch_archives[@]}"
+  fi
   echo "  -> $slice_archive"
+  lipo -info "$slice_archive" 2>/dev/null || true
 }
 
 build_slice iphoneos arm64
