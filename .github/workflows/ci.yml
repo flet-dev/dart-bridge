@@ -1,11 +1,13 @@
 name: CI
 
-# Runs on every push/PR: builds all platform artifacts but doesn't publish.
-# Tagged releases use release.yml below.
+# Single workflow for both branch/PR validation and tagged-release publish.
+# - push to main / PR / workflow_dispatch  → build all 4 platforms, upload artifacts
+# - tag push (v*.*.*)                       → build + attach artifacts to GitHub Release
 
 on:
   push:
     branches: [main]
+    tags: ['v*.*.*']
   pull_request:
   workflow_dispatch:
 
@@ -213,3 +215,41 @@ jobs:
           name: dart_bridge-apple-xcframework
           path: dist/dart_bridge-apple.xcframework.zip
           if-no-files-found: error
+
+  # Tag-gated publish: collects every build job's artifacts and attaches
+  # them to a GitHub Release named after the pushed tag. Skipped for
+  # branch / PR runs.
+  publish:
+    needs: [build-linux, build-windows, build-android, build-apple]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts into one dir
+        run: |
+          mkdir -p dist
+          find artifacts -type f \( -name '*.so' -o -name '*.dll' -o -name '*.zip' \) -exec cp {} dist/ \;
+          echo "=== Release payload ==="
+          ls -lh dist/
+
+      - name: Attach to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/libdart_bridge-linux-x86_64.so
+            dist/libdart_bridge-linux-aarch64.so
+            dist/dart_bridge-windows-x86_64.dll
+            dist/dart_bridge_d-windows-x86_64.dll
+            dist/libdart_bridge-android-arm64-v8a.so
+            dist/libdart_bridge-android-armeabi-v7a.so
+            dist/libdart_bridge-android-x86_64.so
+            dist/dart_bridge-apple.xcframework.zip
+          fail_on_unmatched_files: true
