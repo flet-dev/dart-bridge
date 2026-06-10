@@ -116,33 +116,45 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Per-Python-version Android binaries. python-build-standalone's
+        # libpython3.so on Linux/Android is a GNU linker script that
+        # substitutes -lpython3.X at link time, so DT_NEEDED in the resulting
+        # libdart_bridge.so is the version-specific libpython3.X.so. That
+        # makes Android binaries inherently tied to one CPython version —
+        # honest about that here with a matrix axis.
         abi: [arm64-v8a, armeabi-v7a, x86_64]
+        python_version: ['3.12', '3.13', '3.14']
+        exclude:
+          # 32-bit Android dropped in CPython 3.13+ (PEP 738).
+          - abi: armeabi-v7a
+            python_version: '3.13'
+          - abi: armeabi-v7a
+            python_version: '3.14'
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download Python headers (python-android-mobile-forge)
+      - name: Download Python headers + libpython (python-android-mobile-forge)
         run: |
           set -euo pipefail
-          # We just need Python.h — the mobile-forge tarball includes it.
-          # Bridge is abi3 so any 3.12+ headers work for all 3.12+ runtimes.
-          VER=3.12
+          VER=${{ matrix.python_version }}
           curl -fL -o pamf.tar.gz \
             "https://github.com/flet-dev/python-build/releases/download/v${VER}/python-android-mobile-forge-${VER}.tar.gz"
           mkdir -p pydist
-          # libpython3.so is the abi3 stub but has DT_NEEDED on the version-
-          # specific libpython3.X.so. Extract both so the linker can resolve
-          # the stub's dependency at link time.
+          # libpython3.so is the GNU linker script `INPUT(-lpython3.X)`;
+          # extracting both lets ld follow the script to libpython3.X.so on
+          # the link path. DT_NEEDED ends up as libpython3.X.so (the
+          # version-specific one) — exactly what we want for the per-version
+          # binary we're producing here.
           tar -xzf pamf.tar.gz -C pydist --wildcards \
             "install/android/${{ matrix.abi }}/python-${VER}.*/include/" \
             "install/android/${{ matrix.abi }}/python-${VER}.*/lib/libpython3.so" \
             "install/android/${{ matrix.abi }}/python-${VER}.*/lib/libpython${VER}.so"
-          echo "Python.h:"; find pydist -name Python.h
-          echo "libpython3.so (abi3 stub):"; find pydist -name libpython3.so
 
-      - name: Cross-compile dart_bridge.so
+      - name: Cross-compile libdart_bridge.so
         run: |
           set -euxo pipefail
           ABI=${{ matrix.abi }}
+          VER=${{ matrix.python_version }}
           case "$ABI" in
             arm64-v8a)    TARGET=aarch64-linux-android ;;
             armeabi-v7a)  TARGET=armv7a-linux-androideabi ;;
@@ -154,17 +166,12 @@ jobs:
 
           INCLUDE_DIR=$(find pydist -path "*/include/python3.*" -type d | head -n1)
           LIBPYTHON=$(find pydist -name libpython3.so | head -n1)
+          LIBPYTHON_DIR=$(dirname "$LIBPYTHON")
           test -n "$INCLUDE_DIR" -a -n "$LIBPYTHON"
 
           mkdir -p dist
-          OUT="dist/libdart_bridge-android-${ABI}.so"
+          OUT="dist/libdart_bridge-android-${ABI}-py${VER}.so"
 
-          # Link the abi3 stub (libpython3.so). It has DT_NEEDED on the
-          # version-specific libpython3.<X>.so; -L the same lib dir so the
-          # linker can satisfy that dependency at link time. At runtime, the
-          # consuming app loads its own libpython3.<X>.so and the stub
-          # forwards calls there.
-          LIBPYTHON_DIR=$(dirname "$LIBPYTHON")
           $CC -shared -fPIC -fvisibility=hidden \
             -DDART_SHARED_LIB \
             -DPy_LIMITED_API=0x030c0000 \
@@ -178,12 +185,13 @@ jobs:
             -o "$OUT"
 
           file "$OUT"
-          ls -lh "$OUT"
+          echo "DT_NEEDED entries (should include libpython${VER}.so):"
+          $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf -d "$OUT" | grep NEEDED || true
 
       - uses: actions/upload-artifact@v4
         with:
-          name: libdart_bridge-android-${{ matrix.abi }}
-          path: dist/libdart_bridge-android-${{ matrix.abi }}.so
+          name: libdart_bridge-android-${{ matrix.abi }}-py${{ matrix.python_version }}
+          path: dist/libdart_bridge-android-${{ matrix.abi }}-py${{ matrix.python_version }}.so
           if-no-files-found: error
 
   build-apple:
@@ -248,8 +256,12 @@ jobs:
             dist/libdart_bridge-linux-aarch64.so
             dist/dart_bridge-windows-x86_64.dll
             dist/dart_bridge_d-windows-x86_64.dll
-            dist/libdart_bridge-android-arm64-v8a.so
-            dist/libdart_bridge-android-armeabi-v7a.so
-            dist/libdart_bridge-android-x86_64.so
+            dist/libdart_bridge-android-arm64-v8a-py3.12.so
+            dist/libdart_bridge-android-arm64-v8a-py3.13.so
+            dist/libdart_bridge-android-arm64-v8a-py3.14.so
+            dist/libdart_bridge-android-armeabi-v7a-py3.12.so
+            dist/libdart_bridge-android-x86_64-py3.12.so
+            dist/libdart_bridge-android-x86_64-py3.13.so
+            dist/libdart_bridge-android-x86_64-py3.14.so
             dist/dart_bridge-apple.xcframework.zip
           fail_on_unmatched_files: true
