@@ -28,10 +28,30 @@ jobs:
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y cmake build-essential python3-dev
 
+      - name: Download python-linux-dart for abi3 link target
+        run: |
+          set -euo pipefail
+          PYVER=3.12   # any 3.12+ works; we only need headers + abi3 stub libpython3.so
+          curl -fL -o pyld.tar.gz \
+            "https://github.com/flet-dev/python-build/releases/download/v${PYVER}/python-linux-dart-${PYVER}-${{ matrix.arch }}.tar.gz"
+          mkdir -p pydist && tar -xzf pyld.tar.gz -C pydist
+          echo "DART_BRIDGE_PYTHON_INCLUDE_DIRS=$PWD/pydist/include/python${PYVER}" >> "$GITHUB_ENV"
+          echo "DART_BRIDGE_PYTHON_LIBRARIES=$PWD/pydist/lib/libpython3.so" >> "$GITHUB_ENV"
+
       - name: Configure + build
         run: |
-          cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+          cmake -B build -S . -DCMAKE_BUILD_TYPE=Release \
+            -DDART_BRIDGE_PYTHON_INCLUDE_DIRS="${DART_BRIDGE_PYTHON_INCLUDE_DIRS}" \
+            -DDART_BRIDGE_PYTHON_LIBRARIES="${DART_BRIDGE_PYTHON_LIBRARIES}"
           cmake --build build --parallel
+
+      - name: Verify DT_NEEDED includes libpython3.so
+        run: |
+          set -euo pipefail
+          NEEDED=$(readelf -d build/libdart_bridge.so | grep NEEDED || true)
+          echo "$NEEDED"
+          echo "$NEEDED" | grep -q "libpython3.so" || \
+            { echo "ERROR: libdart_bridge.so is missing libpython3.so in DT_NEEDED"; exit 1; }
 
       - name: Stage artifact with platform-tagged name
         run: |

@@ -37,13 +37,22 @@ if(NOT DEFINED DART_BRIDGE_PYTHON_INCLUDE_DIRS)
     # reference, Py_* symbols stay unresolved at dlopen, and the embedded
     # interpreter crashes on first Py_Initialize.
     #
-    # Link the abi3 stub libpython3.so (version-agnostic). At runtime the
-    # dynamic linker finds libpython3.so next to the .so and chains to the
-    # specific libpython3.X.so it forwards to.
-    find_library(_libpython3_so python3
-                 HINTS ${Python3_LIBRARY_DIRS}
-                 REQUIRED)
-    set(DART_BRIDGE_PYTHON_LIBRARIES "${_libpython3_so}")
+    # Prefer the abi3 stub libpython3.so (version-agnostic DT_NEEDED).
+    # python-build-standalone ships it; Ubuntu's python3-dev typically does
+    # not. CI overrides via -DDART_BRIDGE_PYTHON_LIBRARIES=<path> to
+    # python-linux-dart's libpython3.so. Local desktop dev falls back to
+    # the version-specific libpython (DT_NEEDED becomes libpython3.X.so).
+    find_library(_libpython3_so python3 HINTS ${Python3_LIBRARY_DIRS})
+    if(_libpython3_so)
+      message(STATUS "Linking abi3 libpython3.so: ${_libpython3_so}")
+      set(DART_BRIDGE_PYTHON_LIBRARIES "${_libpython3_so}")
+    else()
+      message(WARNING
+        "abi3 libpython3.so not found; falling back to version-specific "
+        "Python3_LIBRARIES — the resulting .so will only run against "
+        "matching Python ${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}")
+      set(DART_BRIDGE_PYTHON_LIBRARIES ${Python3_LIBRARIES})
+    endif()
   else()
     # Apple host build (local dev only — CI uses build_xcframework.sh).
     set(DART_BRIDGE_PYTHON_LIBRARIES Python3::Module)
