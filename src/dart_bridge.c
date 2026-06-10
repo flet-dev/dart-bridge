@@ -1,124 +1,100 @@
+// dart_bridge — in-process Dart ↔ Python byte transport.
+//
+// Compiled into a single libdart_bridge binary (.so / .dll / static lib in
+// xcframework) consumed by serious_python's platform plugins. Two C-callable
+// surfaces live here:
+//
+//   1. Dart-callable: DartBridge_InitDartApiDL, DartBridge_EnqueueMessage,
+//      dart_bridge_post_to_dart. Looked up by Dart via FFI.
+//
+//   2. Python-callable: a built-in module `dart_bridge` registered via
+//      PyImport_AppendInittab (see serious_python_run.c) before Py_Initialize.
+//      Exposes two methods to Python code:
+//        - set_enqueue_handler_func(callable)
+//        - send_bytes(port, payload)
+//
+// Both halves share a single global cell `dart_bridge_global_enqueue_handler_func`
+// holding the Python callable that DartBridge_EnqueueMessage hands incoming
+// bytes to. Static linking inside one binary keeps Dart's view and Python's
+// view of that cell trivially identical.
+
 #define PY_SSIZE_T_CLEAN
+// Limited API / abi3: one compiled binary works across all Python 3.12+
+// minor versions. Every Py* symbol below is in the Limited API since 3.2
+// (3.4 for PyGILState_*).
+#define Py_LIMITED_API 0x030c0000
 #include <Python.h>
 #include <stdint.h>
-#include "dart_api/dart_api_dl.h"
 #include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include "dart_api/dart_api_dl.h"
 
 #if defined(_WIN32)
-#include <windows.h>
 #define EXPORT __declspec(dllexport)
-#define SET_ENV(key, value) _putenv_s(key, value)
 #else
-#include <pthread.h>
-#include <unistd.h>
 #define EXPORT __attribute__((visibility("default")))
-#define SET_ENV(key, value) setenv(key, value, 1)
 #endif
 
-typedef struct {
-    const char* appPath;
-    const char* script;
-    const char** modulePaths;
-    int modulePathsCount;
-    const char** envKeys;
-    const char** envValues;
-    int envCount;
-    int sync;  // 1 = sync, 0 = async (threaded)
-} DartBridgeRunArgs;
+// ---------------------------------------------------------------------------
+// Shared state
+// ---------------------------------------------------------------------------
 
-void run_python(DartBridgeRunArgs* args) {
-    // Set environment variables
-    for (int i = 0; i < args->envCount; i++) {
-        SET_ENV(args->envKeys[i], args->envValues[i]);
-    }
+// Initialised to NULL; set_enqueue_handler_func swaps in a PyObject* callable
+// when Python registers a handler. DartBridge_EnqueueMessage invokes it.
+static PyObject* global_enqueue_handler_func = NULL;
 
-    // Build PYTHONPATH
-    if (args->modulePathsCount > 0) {
-        size_t total_len = 0;
-        const char sep =
-#if defined(_WIN32)
-            ';';
-#else
-            ':';
-#endif
-        for (int i = 0; i < args->modulePathsCount; i++) {
-            total_len += strlen(args->modulePaths[i]) + 1;
-        }
-        char* pythonpath = malloc(total_len);
-        pythonpath[0] = '\0';
-        for (int i = 0; i < args->modulePathsCount; i++) {
-            strcat(pythonpath, args->modulePaths[i]);
-            if (i < args->modulePathsCount - 1) {
-                size_t len = strlen(pythonpath);
-                pythonpath[len] = sep;
-                pythonpath[len + 1] = '\0';
-            }
-        }
-        SET_ENV("PYTHONPATH", pythonpath);
-        free(pythonpath);
-    }
+// ---------------------------------------------------------------------------
+// Dart-callable
+// ---------------------------------------------------------------------------
 
-    Py_Initialize();
-
-    if (args->script && strlen(args->script) > 0) {
-        PyRun_SimpleString(args->script);
-    } else if (args->appPath) {
-        FILE* file = fopen(args->appPath, "rb");
-        if (file) {
-            PyRun_SimpleFileEx(file, args->appPath, 1);  // 1 = close file
-        } else {
-            fprintf(stderr, "Failed to open Python file: %s\n", args->appPath);
-        }
-    }
-
-    if (args->sync) {
-        Py_Finalize();
-    }
+EXPORT intptr_t DartBridge_InitDartApiDL(void* data) {
+    return Dart_InitializeApiDL(data);
 }
 
-#if defined(_WIN32)
-#include <process.h>
-unsigned __stdcall python_thread_main(void* arg) {
-    run_python((DartBridgeRunArgs*)arg);
-    return 0;
-}
-#else
-void* python_thread_main(void* arg) {
-    run_python((DartBridgeRunArgs*)arg);
-    return NULL;
-}
-#endif
-
-// called from Dart via FFI
-#ifdef _WIN32
-__declspec(dllexport)
-#endif
-EXPORT void DartBridge_RunPython(DartBridgeRunArgs* args) {
-    if (args->sync) {
-        run_python(args);
-    } else {
-#if defined(_WIN32)
-        _beginthreadex(NULL, 0, python_thread_main, args, 0, NULL);
-#else
-        pthread_t thread;
-        pthread_create(&thread, NULL, python_thread_main, args);
-        pthread_detach(thread);
-#endif
+EXPORT void DartBridge_EnqueueMessage(const char* data, size_t len) {
+    // Drop messages sent before Python has finished Py_Initialize. Acquiring
+    // the GIL against an uninitialized interpreter triggers a fatal
+    // PyMUTEX_LOCK failure (the gil->mutex is uninitialized). Dart's retry
+    // loop will resend until Python is up.
+    if (!Py_IsInitialized()) {
+        return;
     }
+
+    PyGILState_STATE gstate = PyGILState_Ensure();
+
+    if (!global_enqueue_handler_func) {
+        fprintf(stderr, "[dart_bridge] enqueue handler is not registered\n");
+        PyGILState_Release(gstate);
+        return;
+    }
+
+    PyObject* arg = PyBytes_FromStringAndSize(data, len);
+    if (!arg) {
+        PyErr_Print();
+        PyGILState_Release(gstate);
+        return;
+    }
+
+    PyObject* result = PyObject_CallFunctionObjArgs(
+        global_enqueue_handler_func, arg, NULL);
+    if (!result) {
+        PyErr_Print();
+    }
+
+    Py_XDECREF(arg);
+    Py_XDECREF(result);
+    PyGILState_Release(gstate);
 }
 
-PyObject* global_enqueue_handler_func = NULL;
+// ---------------------------------------------------------------------------
+// Python-callable (built-in module via PyImport_AppendInittab)
+// ---------------------------------------------------------------------------
 
-// called from Python
-static PyObject* set_enqueue_handler_func(PyObject* self, PyObject* args) {
+static PyObject* py_set_enqueue_handler_func(PyObject* self, PyObject* args) {
     PyObject* func;
 
     if (!PyArg_ParseTuple(args, "O:set_enqueue_handler_func", &func)) {
         return NULL;
     }
-
     if (!PyCallable_Check(func)) {
         PyErr_SetString(PyExc_TypeError, "parameter must be callable");
         return NULL;
@@ -131,88 +107,56 @@ static PyObject* set_enqueue_handler_func(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
-// called from Dart via FFI
-#ifdef _WIN32
-__declspec(dllexport)
-#endif
-void DartBridge_EnqueueMessage(const char* data, size_t len) {
-    PyGILState_STATE gstate = PyGILState_Ensure();
+static PyObject* py_send_bytes(PyObject* self, PyObject* args) {
+    int64_t port;
+    const char* buffer;
+    Py_ssize_t length;
 
-    if (!global_enqueue_handler_func) {
-        fprintf(stderr, "[dart_bridge.c] global_enqueue_handler_func is NULL\n");
-        PyGILState_Release(gstate);
-        return;
+    if (!PyArg_ParseTuple(args, "Ly#", &port, &buffer, &length)) {
+        return NULL;
     }
 
-    PyObject* arg = PyBytes_FromStringAndSize(data, len);
-    if (!arg) {
-        PyErr_Print();
-        fprintf(stderr, "[dart_bridge.c] Failed to create PyBytes\n");
-        PyGILState_Release(gstate);
-        return;
+    if (port == 0) {
+        PyErr_SetString(PyExc_RuntimeError, "Dart port is 0 (invalid)");
+        return NULL;
     }
 
-    PyObject* result = PyObject_CallFunctionObjArgs(global_enqueue_handler_func, arg, NULL);
-    if (!result) {
-        PyErr_Print();
-        fprintf(stderr, "[dart_bridge.c] global_enqueue_handler_func call failed\n");
+    // Dart_PostCObject_DL is a function pointer populated by Dart_InitializeApiDL.
+    // Calling it before init segfaults; surface a clean error instead.
+    if (Dart_PostCObject_DL == NULL) {
+        PyErr_SetString(PyExc_RuntimeError,
+                        "Dart API DL not initialized (call DartBridge_InitDartApiDL from Dart first)");
+        return NULL;
     }
 
-    Py_XDECREF(arg);
-    Py_XDECREF(result);
-    PyGILState_Release(gstate);
+    Dart_CObject obj;
+    obj.type = Dart_CObject_kTypedData;
+    obj.value.as_typed_data.type = Dart_TypedData_kUint8;
+    obj.value.as_typed_data.length = (int32_t)length;
+    obj.value.as_typed_data.values = (void*)buffer;
+
+    if (!Dart_PostCObject_DL(port, &obj)) {
+        PyErr_SetString(PyExc_RuntimeError, "Dart_PostCObject_DL failed");
+        return NULL;
+    }
+    Py_RETURN_TRUE;
 }
 
-// called from Dart via FFI
-#ifdef _WIN32
-__declspec(dllexport)
-#endif
-intptr_t DartBridge_InitDartApiDL(void* data) {
-  return Dart_InitializeApiDL(data);
-}
-
-// called from Python
-static PyObject* send_bytes(PyObject* self, PyObject* args) {
-  int64_t port;
-  const char* buffer;
-  Py_ssize_t length;
-
-  // Expecting a tuple: (port, bytes)
-  if (!PyArg_ParseTuple(args, "Ly#", &port, &buffer, &length)) {
-    return NULL;
-  }
-
-  if (port == 0) {
-    PyErr_SetString(PyExc_RuntimeError, "Dart port is 0 (invalid)");
-    return NULL;
-  }
-
-  Dart_CObject obj;
-  obj.type = Dart_CObject_kTypedData;
-  obj.value.as_typed_data.type = Dart_TypedData_kUint8;
-  obj.value.as_typed_data.length = (int32_t)length;
-  obj.value.as_typed_data.values = (void*)buffer;
-
-  bool ok = Dart_PostCObject_DL(port, &obj);
-  if (!ok) {
-    PyErr_SetString(PyExc_RuntimeError, "Dart_PostCObject_DL failed");
-    return NULL;
-  }
-
-  Py_RETURN_TRUE;
-}
-
-static PyMethodDef methods[] = {
-  {"send_bytes", send_bytes, METH_VARARGS, "Send bytes to Dart"},
-  {"set_enqueue_handler_func", set_enqueue_handler_func, METH_VARARGS, "Set the Python handler for C callbacks."},
-  {NULL, NULL, 0, NULL}
+static PyMethodDef dart_bridge_methods[] = {
+    {"send_bytes", py_send_bytes, METH_VARARGS,
+     "Post a bytes payload to a Dart ReceivePort identified by its native port."},
+    {"set_enqueue_handler_func", py_set_enqueue_handler_func, METH_VARARGS,
+     "Register the Python callable that receives bytes posted from Dart."},
+    {NULL, NULL, 0, NULL}
 };
 
-static struct PyModuleDef moduledef = {
-  PyModuleDef_HEAD_INIT,
-  "dart_bridge", NULL, -1, methods
+static struct PyModuleDef dart_bridge_module = {
+    PyModuleDef_HEAD_INIT,
+    "dart_bridge", NULL, -1, dart_bridge_methods
 };
 
+// Registered with CPython via PyImport_AppendInittab before Py_Initialize.
+// User code's `import dart_bridge` resolves here.
 PyMODINIT_FUNC PyInit_dart_bridge(void) {
-  return PyModule_Create(&moduledef);
+    return PyModule_Create(&dart_bridge_module);
 }

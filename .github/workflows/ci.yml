@@ -1,0 +1,206 @@
+name: CI
+
+# Runs on every push/PR: builds all platform artifacts but doesn't publish.
+# Tagged releases use release.yml below.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y cmake build-essential python3-dev
+
+      - name: Configure + build
+        run: |
+          cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel
+
+      - name: Stage artifact with platform-tagged name
+        run: |
+          mkdir -p dist
+          cp build/libdart_bridge.so dist/libdart_bridge-linux-${{ matrix.arch }}.so
+          file dist/libdart_bridge-linux-${{ matrix.arch }}.so
+          ls -lh dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libdart_bridge-linux-${{ matrix.arch }}
+          path: dist/libdart_bridge-linux-${{ matrix.arch }}.so
+          if-no-files-found: error
+
+  build-windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Release CRT = consumed by `flet build` / Release Flutter apps
+        # Debug CRT  = consumed by `flutter run` / Debug Flutter apps
+        config: [release, debug]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download python-windows-for-dart (headers + abi3 stub libs)
+        shell: pwsh
+        run: |
+          $pyver = '3.12'  # any 3.12+ works; we only need headers + libs
+          Invoke-WebRequest -Uri "https://github.com/flet-dev/python-build/releases/download/v$pyver/python-windows-for-dart-$pyver.zip" -OutFile pywin.zip
+          Expand-Archive -Path pywin.zip -DestinationPath pywin -Force
+
+      - name: Build dart_bridge.dll
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsPath = & $vswhere -latest -property installationPath
+          $vcvars = "$vsPath\VC\Auxiliary\Build\vcvars64.bat"
+
+          $includeDir = (Resolve-Path "pywin/include").Path
+          $libDir = (Resolve-Path "pywin/libs").Path
+
+          # Release / Debug variants:
+          #   Release: /MD + python3.lib  → imports python3.dll
+          #   Debug:   /MDd + python3_d.lib → imports python3_d.dll
+          # /LIBPATH points at the same libs dir so pyconfig.h's auto-link
+          # pragma (pythonXY(_d).lib) can resolve too.
+
+          $outDir = "$PWD\dist"
+          New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+
+          if ('${{ matrix.config }}' -eq 'debug') {
+            $crt = '/MDd'
+            $debugDef = '/D_DEBUG'
+            $pyLib = "$libDir\python3_d.lib"
+            $outName = 'dart_bridge_d-windows-x86_64.dll'
+          } else {
+            $crt = '/MD'
+            $debugDef = ''
+            $pyLib = "$libDir\python3.lib"
+            $outName = 'dart_bridge-windows-x86_64.dll'
+          }
+
+          $clCmd = "cl /nologo /LD $crt $debugDef /DDART_SHARED_LIB /DPy_LIMITED_API=0x030c0000 /I `"$includeDir`" /I src src\dart_bridge.c src\dart_api\dart_api_dl.c /link /LIBPATH:`"$libDir`" /OUT:`"$outDir\$outName`" `"$pyLib`""
+          cmd /c "`"$vcvars`" >NUL && $clCmd"
+
+          if (-not (Test-Path "$outDir\$outName")) {
+            throw "Build failed: $outName not produced"
+          }
+          Get-Item "$outDir\$outName" | Format-List FullName, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dart_bridge-windows-x86_64-${{ matrix.config }}
+          path: |
+            dist/dart_bridge-windows-x86_64.dll
+            dist/dart_bridge_d-windows-x86_64.dll
+          if-no-files-found: ignore
+
+  build-android:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [arm64-v8a, armeabi-v7a, x86_64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Python headers (python-android-mobile-forge)
+        run: |
+          set -euo pipefail
+          # We just need Python.h — the mobile-forge tarball includes it.
+          # Bridge is abi3 so any 3.12+ headers work for all 3.12+ runtimes.
+          VER=3.12
+          curl -fL -o pamf.tar.gz \
+            "https://github.com/flet-dev/python-build/releases/download/v${VER}/python-android-mobile-forge-${VER}.tar.gz"
+          mkdir -p pydist
+          tar -xzf pamf.tar.gz -C pydist --wildcards \
+            "install/android/${{ matrix.abi }}/python-${VER}.*/include/" \
+            "install/android/${{ matrix.abi }}/python-${VER}.*/lib/libpython3.so"
+          echo "Python.h:"; find pydist -name Python.h
+          echo "libpython3.so (abi3 stub):"; find pydist -name libpython3.so
+
+      - name: Cross-compile dart_bridge.so
+        run: |
+          set -euxo pipefail
+          ABI=${{ matrix.abi }}
+          case "$ABI" in
+            arm64-v8a)    TARGET=aarch64-linux-android ;;
+            armeabi-v7a)  TARGET=armv7a-linux-androideabi ;;
+            x86_64)       TARGET=x86_64-linux-android ;;
+          esac
+          API=21
+          NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_LATEST_HOME}}"
+          CC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/${TARGET}${API}-clang"
+
+          INCLUDE_DIR=$(find pydist -path "*/include/python3.*" -type d | head -n1)
+          LIBPYTHON=$(find pydist -name libpython3.so | head -n1)
+          test -n "$INCLUDE_DIR" -a -n "$LIBPYTHON"
+
+          mkdir -p dist
+          OUT="dist/libdart_bridge-android-${ABI}.so"
+
+          # Link the abi3 stub (libpython3.so) — DT_NEEDED resolves at runtime
+          # against whatever libpython3.<X>.so the consuming app has loaded.
+          $CC -shared -fPIC -fvisibility=hidden \
+            -DDART_SHARED_LIB \
+            -DPy_LIMITED_API=0x030c0000 \
+            -I "$INCLUDE_DIR" \
+            -I src \
+            src/dart_bridge.c src/dart_api/dart_api_dl.c \
+            "$LIBPYTHON" \
+            -ldl \
+            -Wl,-z,max-page-size=16384 \
+            -o "$OUT"
+
+          file "$OUT"
+          ls -lh "$OUT"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libdart_bridge-android-${{ matrix.abi }}
+          path: dist/libdart_bridge-android-${{ matrix.abi }}.so
+          if-no-files-found: error
+
+  build-apple:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Python iOS dist (headers)
+        run: |
+          set -euo pipefail
+          VER=3.12  # abi3: any 3.12+ headers work
+          curl -fL -o pyios.tar.gz \
+            "https://github.com/flet-dev/python-build/releases/download/v${VER}/python-ios-dart-${VER}.tar.gz"
+          mkdir -p pyios && tar -xzf pyios.tar.gz -C pyios
+          # Find Python.h inside the extracted tree
+          HEADER_DIR=$(find pyios -name Python.h -exec dirname {} \; | head -n1)
+          echo "PYTHON_HEADERS_DIR=$HEADER_DIR" >> "$GITHUB_ENV"
+
+      - name: Build xcframework
+        run: ./apple/build_xcframework.sh
+
+      - name: Inspect artifact
+        run: |
+          ls -la dist/
+          du -sh dist/dart_bridge-apple.xcframework.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dart_bridge-apple-xcframework
+          path: dist/dart_bridge-apple.xcframework.zip
+          if-no-files-found: error
