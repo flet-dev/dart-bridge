@@ -17,7 +17,7 @@
 
 cmake_minimum_required(VERSION 3.15)
 
-project(dart_bridge VERSION 1.2.1 LANGUAGES C)
+project(dart_bridge VERSION 1.2.2 LANGUAGES C)
 
 if(NOT DEFINED DART_BRIDGE_PYTHON_INCLUDE_DIRS)
   find_package(Python3 REQUIRED COMPONENTS Development.Module)
@@ -28,7 +28,24 @@ if(NOT DEFINED DART_BRIDGE_PYTHON_INCLUDE_DIRS)
     # no debug-variant requirement (matches our Py_LIMITED_API choice).
     get_filename_component(_python_root "${Python3_INCLUDE_DIRS}" DIRECTORY)
     set(DART_BRIDGE_PYTHON_LIBRARIES "${_python_root}/libs/python3.lib")
+  elseif(UNIX AND NOT APPLE)
+    # Linux: Python3::Module would be the "extension module" target which
+    # intentionally leaves libpython unlinked (the Python interpreter that
+    # dlopen()s the module is expected to provide the symbols). dart_bridge
+    # is the OPPOSITE — Dart loads it to embed Python, so libpython MUST be
+    # in DT_NEEDED. Without this, the resulting .so has no libpython
+    # reference, Py_* symbols stay unresolved at dlopen, and the embedded
+    # interpreter crashes on first Py_Initialize.
+    #
+    # Link the abi3 stub libpython3.so (version-agnostic). At runtime the
+    # dynamic linker finds libpython3.so next to the .so and chains to the
+    # specific libpython3.X.so it forwards to.
+    find_library(_libpython3_so python3
+                 HINTS ${Python3_LIBRARY_DIRS}
+                 REQUIRED)
+    set(DART_BRIDGE_PYTHON_LIBRARIES "${_libpython3_so}")
   else()
+    # Apple host build (local dev only — CI uses build_xcframework.sh).
     set(DART_BRIDGE_PYTHON_LIBRARIES Python3::Module)
   endif()
 endif()
