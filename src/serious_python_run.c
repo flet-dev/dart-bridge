@@ -21,16 +21,57 @@
 
 #include "dart_api/dart_api_dl.h"
 
-// PyRun_SimpleString and PyRun_SimpleFile are macros over PyRun_*Flags which
-// the Limited API hides (cpython/pythonrun.h is gated on !Py_LIMITED_API).
-// The underlying functions exist in every CPython 3.x's libpython binary —
-// they're stable in practice but Python's Limited API guarantee doesn't
-// formally cover them. Declare them manually so we can call them without
-// dropping Py_LIMITED_API everywhere.
-PyAPI_FUNC(int) PyRun_SimpleStringFlags(const char *, void *);
-PyAPI_FUNC(int) PyRun_SimpleFileExFlags(FILE *, const char *, int, void *);
-#define PyRun_SimpleString(s)    PyRun_SimpleStringFlags((s), NULL)
-#define PyRun_SimpleFile(fp, fn) PyRun_SimpleFileExFlags((fp), (fn), 0, NULL)
+// PyRun_SimpleString and PyRun_SimpleFile aren't in the Limited API — the
+// abi3 stub library (python3.lib on Windows) doesn't export them. We
+// reimplement them using Py_CompileString + PyEval_EvalCode against
+// __main__'s globals, which ARE in the Limited API (since 3.2). Behavior
+// matches CPython's own PyRun_SimpleStringFlags / PyRun_SimpleFileExFlags
+// (see Python/pythonrun.c).
+static int sp_pyrun_string(const char *source, const char *filename) {
+    PyObject *code = Py_CompileString(source, filename, Py_file_input);
+    if (!code) {
+        PyErr_Print();
+        return -1;
+    }
+
+    PyObject *main_mod = PyImport_AddModule("__main__");  // borrowed
+    if (!main_mod) {
+        Py_DECREF(code);
+        PyErr_Print();
+        return -1;
+    }
+    PyObject *globals = PyModule_GetDict(main_mod);  // borrowed
+
+    PyObject *result = PyEval_EvalCode(code, globals, globals);
+    Py_DECREF(code);
+    if (!result) {
+        PyErr_Print();
+        return -1;
+    }
+    Py_DECREF(result);
+    return 0;
+}
+
+static int sp_pyrun_file(FILE *fp, const char *filename) {
+    // Slurp file into memory then compile + eval.
+    if (fseek(fp, 0, SEEK_END) != 0) return -1;
+    long size = ftell(fp);
+    if (size < 0) return -1;
+    rewind(fp);
+
+    char *buf = (char *)malloc((size_t)size + 1);
+    if (!buf) return -1;
+    size_t n = fread(buf, 1, (size_t)size, fp);
+    if (n != (size_t)size) {
+        free(buf);
+        return -1;
+    }
+    buf[size] = '\0';
+
+    int rc = sp_pyrun_string(buf, filename);
+    free(buf);
+    return rc;
+}
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -249,7 +290,7 @@ static int sp_apply_module_paths(sp_state_t* st) {
     *p++ = ']';
     *p   = '\0';
 
-    int rc = PyRun_SimpleString(code);
+    int rc = sp_pyrun_string(code, "<sp_module_paths>");
     free(code);
     if (rc != 0) {
         fprintf(stderr, "[serious_python_run] sys.path injection failed\n");
@@ -265,14 +306,14 @@ static int sp_apply_program_name(sp_state_t* st) {
     // Naive escape: rely on caller not providing wild characters; program
     // name is typically a bundle identifier or "python".
     snprintf(buf, sizeof(buf), "import sys; sys.argv = [r'''%s''']", name);
-    return PyRun_SimpleString(buf) == 0 ? 0 : -1;
+    return sp_pyrun_string(buf, "<sp_program_name>") == 0 ? 0 : -1;
 }
 
 // Run the configured target. Returns exit code (0 = OK).
 static int sp_run_target(sp_state_t* st) {
     if (st->mode == SP_RUN_SCRIPT) {
         if (!st->script_source) return 1;
-        int rc = PyRun_SimpleString(st->script_source);
+        int rc = sp_pyrun_string(st->script_source, "<sp_script>");
         return rc == 0 ? 0 : 1;
     }
     // SP_RUN_PATH
@@ -282,7 +323,7 @@ static int sp_run_target(sp_state_t* st) {
         fprintf(stderr, "[serious_python_run] cannot open %s\n", st->app_path);
         return 1;
     }
-    int rc = PyRun_SimpleFile(fp, st->app_path);
+    int rc = sp_pyrun_file(fp, st->app_path);
     fclose(fp);
     return rc == 0 ? 0 : 1;
 }
