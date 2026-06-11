@@ -23,7 +23,7 @@ jobs:
             arch: aarch64
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install build deps
         run: sudo apt-get update && sudo apt-get install -y cmake build-essential python3-dev
@@ -60,7 +60,7 @@ jobs:
           file dist/libdart_bridge-linux-${{ matrix.arch }}.so
           ls -lh dist/
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: libdart_bridge-linux-${{ matrix.arch }}
           path: dist/libdart_bridge-linux-${{ matrix.arch }}.so
@@ -75,7 +75,7 @@ jobs:
         # Debug CRT  = consumed by `flutter run` / Debug Flutter apps
         config: [release, debug]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download python-windows-for-dart (headers + abi3 stub libs)
         shell: pwsh
@@ -123,7 +123,7 @@ jobs:
           }
           Get-Item "$outDir\$outName" | Format-List FullName, Length
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dart_bridge-windows-x86_64-${{ matrix.config }}
           path: |
@@ -151,7 +151,7 @@ jobs:
           - abi: armeabi-v7a
             python_version: '3.14'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download Python headers + libpython (python-android-mobile-forge)
         run: |
@@ -208,7 +208,7 @@ jobs:
           echo "DT_NEEDED entries (should include libpython${VER}.so):"
           $NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf -d "$OUT" | grep NEEDED || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: libdart_bridge-android-${{ matrix.abi }}-py${{ matrix.python_version }}
           path: dist/libdart_bridge-android-${{ matrix.abi }}-py${{ matrix.python_version }}.so
@@ -217,7 +217,7 @@ jobs:
   build-apple:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download Python iOS dist (headers)
         run: |
@@ -238,7 +238,7 @@ jobs:
           ls -la dist/
           du -sh dist/dart_bridge-apple.xcframework.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dart_bridge-apple-xcframework
           path: dist/dart_bridge-apple.xcframework.zip
@@ -254,7 +254,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
 
