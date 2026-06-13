@@ -67,7 +67,7 @@ jobs:
           if-no-files-found: error
 
   build-windows:
-    runs-on: windows-latest
+    runs-on: windows-2025-vs2026
     strategy:
       fail-fast: false
       matrix:
