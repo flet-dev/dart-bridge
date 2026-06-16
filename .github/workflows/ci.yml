@@ -194,7 +194,6 @@ jobs:
 
           $CC -shared -fPIC -fvisibility=hidden \
             -DDART_SHARED_LIB \
-            -DPy_LIMITED_API=0x030c0000 \
             -I "$INCLUDE_DIR" \
             -I src \
             src/dart_bridge.c src/serious_python_run.c src/dart_api/dart_api_dl.c \
