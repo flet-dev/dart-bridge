@@ -12,7 +12,13 @@
 // for sys.path / sys.argv adjustments.
 
 #define PY_SSIZE_T_CLEAN
+// Android uses the FULL CPython API (not abi3): it needs PyConfig to start the
+// interpreter with site disabled so the serious_python native-module finder is
+// installed before `site` runs. The Android binary is already per-CPython-version
+// (DT_NEEDED libpython3.X.so), so giving up abi3 portability there costs nothing.
+#if !defined(__ANDROID__)
 #define Py_LIMITED_API 0x030c0000
+#endif
 #include <Python.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -422,12 +428,31 @@ static int sp_run_python(sp_state_t* st) {
         return 1;
     }
 
+#ifdef __ANDROID__
+    // Start with site disabled so the serious_python native-module finder is
+    // installed BEFORE `site` runs (some lib-dynload extension modules could
+    // otherwise be imported during site, before the finder exists). PYTHONHOME /
+    // PYTHONPATH (applied via sp_apply_env above) are honoured by PyConfig, so the
+    // stdlib zip is on sys.path and `_sp_bootstrap` is importable here.
+    {
+        PyConfig config;
+        PyConfig_InitPythonConfig(&config);
+        config.site_import = 0;
+        PyStatus status = Py_InitializeFromConfig(&config);
+        PyConfig_Clear(&config);
+        if (PyStatus_Exception(status)) {
+            fprintf(stderr, "[serious_python_run] Py_InitializeFromConfig failed\n");
+            return 1;
+        }
+    }
+#else
     Py_Initialize();
 
     if (!Py_IsInitialized()) {
         fprintf(stderr, "[serious_python_run] Py_Initialize failed\n");
         return 1;
     }
+#endif
 
     // Install Python-level sys.stdout / sys.stderr wrappers that forward
     // to the platform's native log sink (logcat on Android, os_log on
@@ -436,6 +461,17 @@ static int sp_run_python(sp_state_t* st) {
     // setup, the user's module top-level statements) land in logcat
     // rather than vanishing into /dev/null on mobile.
     dart_bridge_install_stdio_redirect();
+
+#ifdef __ANDROID__
+    // Install the jniLibs native-module finder, THEN run site (which we disabled
+    // at init). The finder resolves CPython extension modules relocated into
+    // jniLibs/<abi>/ from their .soref markers in the stdlib/sitepackages zips.
+    if (sp_pyrun_string("import _sp_bootstrap; _sp_bootstrap.install()", "<sp_finder>") != 0
+        || sp_pyrun_string("import site; site.main()", "<sp_site>") != 0) {
+        Py_Finalize();
+        return 1;
+    }
+#endif
 
     if (sp_apply_program_name(st) != 0 || sp_apply_module_paths(st) != 0) {
         Py_Finalize();
