@@ -96,6 +96,18 @@ extern PyObject* PyInit_dart_bridge(void);
 // dart_bridge.c.
 extern void dart_bridge_clear_handlers(void);
 
+// Install Python-level sys.stdout / sys.stderr wrappers that forward
+// writes to the platform native log sink. See dart_bridge.c.
+extern int dart_bridge_install_stdio_redirect(void);
+
+// Fire registered Python session-restart handlers with the new port map.
+// On Android process reuse (Dart VM restart while libdart_bridge stays
+// loaded), this is how the running Python program learns about the new
+// Dart native port numbers. See dart_bridge.c.
+extern void dart_bridge_signal_dart_session(int n_pairs,
+                                            const char* const* labels,
+                                            const int64_t* ports);
+
 // ---------------------------------------------------------------------------
 // Public C API (mirrors the SeriousPythonRunConfig the Dart side builds)
 // ---------------------------------------------------------------------------
@@ -332,15 +344,76 @@ static int sp_run_target(sp_state_t* st) {
     return rc == 0 ? 0 : 1;
 }
 
+// Extract dart_bridge port env vars from this run's config and signal
+// the running Python program that a new Dart VM session is active.
+//
+// This is the process-reuse path: libdart_bridge (and Python) stayed
+// loaded from the previous Dart VM, but that VM has been torn down and a
+// new one is starting. The new VM passes its fresh native port numbers
+// via env vars; we forward them as a labeled map to Python's registered
+// session-restart handlers (FletDartBridgeServer's restart loop, the
+// python.dart sys.exit patcher, etc.).
+static void sp_signal_session_from_env(sp_state_t* st) {
+    // Recognised env keys → restart-handler labels. The Dart side stamps
+    // both env vars (for fresh start) and calls signalDartSession (for
+    // reuse) with parallel arrays; here we reconstruct the labeled form
+    // from whichever env vars are present in this run's config.
+    static const struct {
+        const char* env_key;
+        const char* label;
+    } known[] = {
+        {"FLET_DART_BRIDGE_PORT",      "protocol"},
+        {"FLET_DART_BRIDGE_EXIT_PORT", "exit"},
+    };
+    const int known_count = (int)(sizeof(known) / sizeof(known[0]));
+
+    const char* labels[8];
+    int64_t     ports[8];
+    int n = 0;
+
+    for (int i = 0; i < known_count && n < (int)(sizeof(labels) / sizeof(labels[0])); i++) {
+        // Look the env key up in st->env_keys/values (the deep-copy made
+        // by sp_state_from_config). The host process env was already
+        // updated by sp_apply_env on fresh start, but on reuse we don't
+        // re-call that; the values in st are the authoritative source.
+        for (size_t j = 0; j < st->env_count; j++) {
+            if (st->env_keys[j] && strcmp(st->env_keys[j], known[i].env_key) == 0
+                && st->env_values[j]) {
+                long long v = strtoll(st->env_values[j], NULL, 10);
+                if (v > 0) {
+                    labels[n] = known[i].label;
+                    ports[n]  = (int64_t)v;
+                    n++;
+                }
+                break;
+            }
+        }
+    }
+
+    if (n > 0) {
+        dart_bridge_signal_dart_session(n, labels, ports);
+    }
+}
+
 // Drive the full Python lifecycle for this run. Returns the target's
 // exit code (or 1 on internal failure).
 static int sp_run_python(sp_state_t* st) {
-    // Refuse to re-initialize: typical embedded usage runs Python once per
-    // process. Hot-reload paths can call serious_python_finalize first.
+    // Process-reuse path: Python is still up from a previous Dart VM
+    // (typical on Android when the OS kept the process alive across a
+    // back-button exit). Don't re-Py_Initialize — that would crash.
+    // Don't re-run the user's main module — it's still running. Instead:
+    //
+    // 1. Update the process env vars to this run's values. Python's own
+    //    bootstrap reads them once on first start; this keeps the host
+    //    env consistent for anything that reads `os.environ` later.
+    // 2. Forward the new Dart native port numbers to Python via the
+    //    session-restart callback so registered handlers (flet's
+    //    FletDartBridgeServer restart loop, the python.dart sys.exit
+    //    patcher) can rewire to them.
     if (Py_IsInitialized()) {
-        fprintf(stderr,
-                "[serious_python_run] Python already initialized; skipping run\n");
-        return 1;
+        sp_apply_env(st);
+        sp_signal_session_from_env(st);
+        return 0;
     }
 
     sp_apply_env(st);
@@ -355,6 +428,14 @@ static int sp_run_python(sp_state_t* st) {
         fprintf(stderr, "[serious_python_run] Py_Initialize failed\n");
         return 1;
     }
+
+    // Install Python-level sys.stdout / sys.stderr wrappers that forward
+    // to the platform's native log sink (logcat on Android, os_log on
+    // iOS, fd 1/2 passthrough on desktop). Done immediately post-init so
+    // even bootstrap-time prints (sys.path injection, program-name
+    // setup, the user's module top-level statements) land in logcat
+    // rather than vanishing into /dev/null on mobile.
+    dart_bridge_install_stdio_redirect();
 
     if (sp_apply_program_name(st) != 0 || sp_apply_module_paths(st) != 0) {
         Py_Finalize();
