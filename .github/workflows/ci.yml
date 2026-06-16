@@ -201,6 +201,7 @@ jobs:
             -L "$LIBPYTHON_DIR" \
             "$LIBPYTHON" \
             -ldl \
+            -llog \
             -Wl,-z,max-page-size=16384 \
             -o "$OUT"
 
