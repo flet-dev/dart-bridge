@@ -239,9 +239,27 @@ EXPORT void dart_bridge_signal_dart_session(int n_pairs,
 // fwrite per platform.
 // ---------------------------------------------------------------------------
 
+// Returns 1 if every byte in `buf` is whitespace (space/tab/CR/LF), 0
+// otherwise. Used to drop the standalone "\n" writes that CPython's
+// `print(x)` emits separately after the value — otherwise each print()
+// produces a blank logcat / os_log entry alongside its real line.
+static int is_all_whitespace(const char* buf, Py_ssize_t len) {
+    for (Py_ssize_t i = 0; i < len; i++) {
+        char c = buf[i];
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') return 0;
+    }
+    return 1;
+}
+
 static void native_log_write(int is_stderr, const char* buf, Py_ssize_t len) {
     if (len <= 0) return;
 #if defined(__ANDROID__)
+    // __android_log_write adds its own newline per call AND every entry
+    // has a row of metadata. Standalone "\n" writes from `print()`'s
+    // second sub-call would each become a blank logcat row — skip them.
+    // (Multi-byte whitespace runs e.g. "\n\n" coalesce to one skipped
+    // call, which is also what the user wants visually.)
+    if (is_all_whitespace(buf, len)) return;
     // __android_log_write expects a NUL-terminated string. Buffer is
     // typically short (one write call per print line); copy + NUL-pad.
     char stack_buf[1024];
@@ -259,6 +277,9 @@ static void native_log_write(int is_stderr, const char* buf, Py_ssize_t len) {
                         "flet.python", tmp);
     if (tmp != stack_buf) free(tmp);
 #elif defined(__APPLE__)
+    // os_log behaves like logcat — one entry per call with its own
+    // metadata. Same blank-line skip applies.
+    if (is_all_whitespace(buf, len)) return;
     // os_log truncates at ~1KB by default; for longer payloads we'd want
     // to chunk. Most print()s are well under that. is_stderr maps to
     // OS_LOG_TYPE_ERROR, otherwise OS_LOG_TYPE_DEFAULT.
@@ -278,8 +299,10 @@ static void native_log_write(int is_stderr, const char* buf, Py_ssize_t len) {
     }
     if (tmp != stack_buf) free(tmp);
 #else
-    // Desktop: fd 1/2 work — passthrough preserves existing behavior so
-    // `flet run` console output, CI logs, etc. keep flowing.
+    // Desktop: keep raw passthrough — fd 1/2 go to a real terminal and
+    // newlines need to land so consecutive prints stay on separate
+    // lines. No whitespace skip. `flet run` console output, CI logs,
+    // etc. keep flowing exactly as before.
     fwrite(buf, 1, (size_t)len, is_stderr ? stderr : stdout);
     if (is_stderr) fflush(stderr);
 #endif
