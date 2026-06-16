@@ -17,7 +17,7 @@
 
 cmake_minimum_required(VERSION 3.15)
 
-project(dart_bridge VERSION 1.3.0 LANGUAGES C)
+project(dart_bridge VERSION 1.3.1 LANGUAGES C)
 
 if(NOT DEFINED DART_BRIDGE_PYTHON_INCLUDE_DIRS)
   find_package(Python3 REQUIRED COMPONENTS Development.Module)
@@ -112,6 +112,16 @@ if(ANDROID)
   set_target_properties(dart_bridge PROPERTIES
     LINK_FLAGS "-Wl,-z,max-page-size=16384"
   )
+  # `__android_log_write` lives in liblog.so. dart_bridge.c uses it for
+  # the native sys.stdout/sys.stderr → logcat redirect installed at
+  # Py_Initialize. Without an explicit link, this symbol resolves
+  # transitively through libpython3.so on newer Python builds (3.13+)
+  # but NOT on 3.12, which surfaces as
+  #   dlopen failed: cannot locate symbol "__android_log_write"
+  # at app start. Make the dependency explicit so libdart_bridge has
+  # liblog in its own DT_NEEDED regardless of which Python it's paired
+  # with.
+  target_link_libraries(dart_bridge PRIVATE log)
 endif()
 
 if(UNIX AND NOT APPLE AND NOT ANDROID)
