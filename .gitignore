@@ -35,3 +35,8 @@ __pycache__/
 
 # Misc
 .cache/
+
+# local cross-compile artifacts
+pydist_local/
+dist_local/
+/tmp/pamf.tar.gz
