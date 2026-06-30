@@ -141,15 +141,16 @@ jobs:
         # substitutes -lpython3.X at link time, so DT_NEEDED in the resulting
         # libdart_bridge.so is the version-specific libpython3.X.so. That
         # makes Android binaries inherently tied to one CPython version —
-        # honest about that here with a matrix axis.
+        # honest about that here with a matrix axis. python-build publishes
+        # armeabi-v7a for every supported minor, so all ABIs build for all
+        # versions.
         abi: [arm64-v8a, armeabi-v7a, x86_64]
         python_version: ['3.12', '3.13', '3.14']
-        exclude:
-          # 32-bit Android dropped in CPython 3.13+ (PEP 738).
-          - abi: armeabi-v7a
-            python_version: '3.13'
-          - abi: armeabi-v7a
-            python_version: '3.14'
+    env:
+      # python-build release the Android Python headers/libpython come from.
+      # Keep in sync with serious_python's `pythonReleaseDate` — both link
+      # these binaries against the same date-keyed CPython artifacts.
+      PYTHON_BUILD_RELEASE_DATE: '20260629'
     steps:
       - uses: actions/checkout@v6
 
@@ -157,8 +158,16 @@ jobs:
         run: |
           set -euo pipefail
           VER=${{ matrix.python_version }}
+          DATE="$PYTHON_BUILD_RELEASE_DATE"
+          # Resolve the full CPython version for this minor from the pinned
+          # date-keyed release's manifest (the single source of truth shared
+          # with serious_python / flet), then pull that release's
+          # mobile-forge artifact — which carries armeabi-v7a for every minor.
+          curl -fL -o manifest.json \
+            "https://github.com/flet-dev/python-build/releases/download/${DATE}/manifest.json"
+          FULLVER=$(python3 -c "import json;print(json.load(open('manifest.json'))['pythons']['${VER}']['full_version'])")
           curl -fL -o pamf.tar.gz \
-            "https://github.com/flet-dev/python-build/releases/download/v${VER}/python-android-mobile-forge-${VER}.tar.gz"
+            "https://github.com/flet-dev/python-build/releases/download/${DATE}/python-android-mobile-forge-${FULLVER}.tar.gz"
           mkdir -p pydist
           # libpython3.so is the GNU linker script `INPUT(-lpython3.X)`;
           # extracting both lets ld follow the script to libpython3.X.so on
@@ -280,6 +289,8 @@ jobs:
             dist/libdart_bridge-android-arm64-v8a-py3.13.so
             dist/libdart_bridge-android-arm64-v8a-py3.14.so
             dist/libdart_bridge-android-armeabi-v7a-py3.12.so
+            dist/libdart_bridge-android-armeabi-v7a-py3.13.so
+            dist/libdart_bridge-android-armeabi-v7a-py3.14.so
             dist/libdart_bridge-android-x86_64-py3.12.so
             dist/libdart_bridge-android-x86_64-py3.13.so
             dist/libdart_bridge-android-x86_64-py3.14.so
