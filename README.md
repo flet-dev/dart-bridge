@@ -50,8 +50,8 @@ standalone ships `libpython3.so` as a GNU linker script that resolves to
 `libpython3.<ver>.so`, so the resulting `DT_NEEDED` entry is version-
 specific and we publish a binary per `(abi × python_version)`.
 
-armeabi-v7a is only published for Python 3.12 — CPython dropped 32-bit
-Android in 3.13+ (PEP 738).
+armeabi-v7a (32-bit ARM) is published for every supported Python minor
+(3.12, 3.13, 3.14), matching python-build's per-minor `android_abis`.
 
 Download URL pattern:
 
