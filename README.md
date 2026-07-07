@@ -28,8 +28,65 @@ bridge transparently.
   `serious_python_run(config)` (sync or async via Dart port),
   `serious_python_register_extension(name, init)` (additional inittab
   entries beyond dart_bridge), `serious_python_request_stop()`,
-  `serious_python_finalize()`.
+  `serious_python_finalize()`, and the multiprocessing child-interception
+  pair described below.
 - `src/dart_api/` — Dart SDK headers (vendored from the Dart SDK).
+
+## Multiprocessing child interception (1.5.0+)
+
+Python's `multiprocessing` module (`spawn`/`forkserver` start methods and the
+resource tracker) launches helper processes by re-executing `sys.executable`
+with CPython-generated command lines. In an app embedding Python through this
+library, `sys.executable` points at the **host executable**. Without
+interception, each worker re-launches the host app — typically a full GUI —
+instead of running the multiprocessing helper protocol
+([flet-dev/flet#4283](https://github.com/flet-dev/flet/issues/4283)).
+
+`dart_bridge` exports entry points that let the host binary act as a plain
+Python interpreter for exactly those helper invocations:
+
+```c
+int serious_python_is_mp_invocation(int argc, char** argv);
+int serious_python_main(int argc, char** argv);           // delegates to Py_BytesMain
+
+// Windows wide-char variants for wWinMain argv:
+int serious_python_is_mp_invocation_w(int argc, wchar_t** argv);
+int serious_python_main_w(int argc, wchar_t** argv);      // delegates to Py_Main
+```
+
+Host contract: call the detector as the **first thing** in `main`,
+`wWinMain`, or `main.swift`, before any UI, COM, Flutter, GTK, AppKit, or
+engine initialization:
+
+```c
+if (serious_python_is_mp_invocation(argc, argv)) {
+    return serious_python_main(argc, argv);
+}
+```
+
+`serious_python_is_mp_invocation` recognizes CPython multiprocessing helper
+commands by matching `--multiprocessing-fork` anywhere in `argv`, or a `-c`
+payload beginning with `from multiprocessing.` or
+`import sys; from multiprocessing.`. The match is intentionally prefix-based:
+these command lines are CPython implementation details and have changed across
+minor releases, while the helpers remain under `multiprocessing.*`.
+
+`serious_python_main` prepares the child process, scrubs `PYTHONINSPECT`,
+registers the in-binary `dart_bridge` module with the inittab, and delegates
+to the standard CPython command-line entry point. The child locates the
+embedded stdlib/site-packages through the `PYTHONHOME`/`PYTHONPATH`
+environment inherited from the parent process; `serious_python_run` sets those
+process-wide before initializing Python.
+
+On Windows, prefer the `_w` variants from `wWinMain` so Unicode argv values are
+passed directly to `Py_Main` instead of being decoded through the ANSI code
+page.
+
+On Apple platforms, exported entry points are also marked `used`: the
+`dart_bridge` archive is statically linked into the host app, and some public
+symbols are referenced only through `dlsym`/Dart FFI. The marker prevents the
+host linker's dead-strip pass from discarding exports that have no ordinary C
+call site.
 
 ## Released binaries
 
