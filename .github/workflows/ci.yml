@@ -20,9 +20,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: ubuntu-24.04
+          # Oldest supported GitHub runners on purpose: the .so is linked
+          # directly into end users' app executables, so the glibc it binds
+          # (e.g. __isoc23_strtoll@GLIBC_2.38 when built on 24.04) sets the
+          # minimum OS the app can BUILD AND RUN on. (22.04 = glibc 2.35)
+          - runner: ubuntu-22.04
             arch: x86_64
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-22.04-arm
             arch: aarch64
     runs-on: ${{ matrix.runner }}
     steps:
