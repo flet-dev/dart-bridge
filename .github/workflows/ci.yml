@@ -20,23 +20,60 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Oldest supported GitHub runners on purpose: the .so is linked
-          # directly into end users' app executables, so the glibc it binds
-          # (e.g. __isoc23_strtoll@GLIBC_2.38 when built on 24.04) sets the
-          # minimum OS the app can BUILD AND RUN on. (22.04 = glibc 2.35)
-          - runner: ubuntu-22.04
+          - runner: ubuntu-24.04
             arch: x86_64
-          - runner: ubuntu-22.04-arm
+            cmake_arch: linux-x86_64
+          - runner: ubuntu-24.04-arm
             arch: aarch64
+            cmake_arch: linux-aarch64
     runs-on: ${{ matrix.runner }}
+    # Built inside the oldest distro flet supports — debian:10, glibc 2.28, matching
+    # the lowest tier of flet's client build matrix (manylinux_2_28). The .so is linked
+    # directly into end users' app executables at `flet build linux` time, so the glibc
+    # it binds sets the floor for every machine that builds or runs a flet Linux app.
+    # Building straight on a modern runner would raise that floor (e.g. glibc >= 2.38
+    # binds __isoc23_* symbol versions and breaks Ubuntu 22.04 LTS; even glibc 2.35
+    # binds pthread_create@GLIBC_2.34). A 2.28 floor covers Debian 10/11/12,
+    # Ubuntu 20.04/22.04/24.04, and RHEL 8+ with a single artifact per arch.
+    container:
+      image: debian:10
     steps:
+      # Debian 10 (buster) is EOL: its packages moved off the regular mirrors
+      # to archive.debian.org, and the archived Release files' validity dates
+      # have expired (hence Check-Valid-Until off). git + ca-certificates must
+      # be installed before actions/checkout — the action runs inside this
+      # container and needs them.
+      - name: Point apt at the Debian 10 archive (EOL distro)
+        run: |
+          printf '%s\n' \
+            'deb http://archive.debian.org/debian buster main' \
+            'deb http://archive.debian.org/debian buster-updates main' \
+            'deb http://archive.debian.org/debian-security buster/updates main' \
+            > /etc/apt/sources.list
+          echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until
+          apt-get update
+          apt-get install -y build-essential curl ca-certificates git unzip
+
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
-      - name: Install build deps
-        run: sudo apt-get update && sudo apt-get install -y cmake build-essential python3-dev
+      # Debian 10's apt ships CMake 3.13 — below dart-bridge's `cmake_minimum_required(3.15)`
+      # (and the local-dev fallback `find_package(Python3 COMPONENTS Development.Module)`
+      # path needs 3.18+). Kitware's official binary tarballs are built against old
+      # glibc, so a current CMake runs fine on buster.
+      - name: Install modern CMake
+        run: |
+          set -euo pipefail
+          CMAKE_VER=3.31.6
+          curl -fL -o cmake.tar.gz \
+            "https://github.com/Kitware/CMake/releases/download/v${CMAKE_VER}/cmake-${CMAKE_VER}-${{ matrix.cmake_arch }}.tar.gz"
+          tar -xzf cmake.tar.gz -C /opt
+          echo "/opt/cmake-${CMAKE_VER}-${{ matrix.cmake_arch }}/bin" >> "$GITHUB_PATH"
 
+      # We don't bundle Python — we only need Python.h and the abi3 stub
+      # libpython3.so to link against, so the artifact's DT_NEEDED stays
+      # version-agnostic (one binary for every CPython 3.12+).
       - name: Download python-linux-dart for abi3 link target
         run: |
           set -euo pipefail
@@ -47,6 +84,8 @@ jobs:
           echo "DART_BRIDGE_PYTHON_INCLUDE_DIRS=$PWD/pydist/include/python${PYVER}" >> "$GITHUB_ENV"
           echo "DART_BRIDGE_PYTHON_LIBRARIES=$PWD/pydist/lib/libpython3.so" >> "$GITHUB_ENV"
 
+      # Plain Release build; the two -D vars point CMake at the headers and
+      # stub downloaded above (skipping the local-dev find_package fallback).
       - name: Configure + build
         run: |
           cmake -B build -S . -DCMAKE_BUILD_TYPE=Release \
@@ -54,6 +93,10 @@ jobs:
             -DDART_BRIDGE_PYTHON_LIBRARIES="${DART_BRIDGE_PYTHON_LIBRARIES}"
           cmake --build build --parallel
 
+      # Dart hosts load this library to EMBED Python, so libpython must be in
+      # DT_NEEDED — unlike a Python extension module, where the interpreter
+      # already provides the symbols. Guards against the linking mistake
+      # where the .so builds fine but Py_Initialize crashes at dlopen time.
       - name: Verify DT_NEEDED includes libpython3.so
         run: |
           set -euo pipefail
@@ -62,6 +105,21 @@ jobs:
           echo "$NEEDED" | grep -q "libpython3.so" || \
             { echo "ERROR: libdart_bridge.so is missing libpython3.so in DT_NEEDED"; exit 1; }
 
+      # The real compatibility contract: the artifact must not reference any
+      # glibc symbol newer than 2.28 (flet's lowest supported tier). This is
+      # what a container bump would silently break — fail loudly instead.
+      - name: Verify glibc floor is at most 2.28
+        run: |
+          set -euo pipefail
+          MAX=$(objdump -T build/libdart_bridge.so | grep -oE 'GLIBC_2\.[0-9]+' | sort -V | tail -1)
+          echo "max versioned glibc symbol: ${MAX:-none}"
+          HIGHEST=$(printf '%s\nGLIBC_2.28\n' "${MAX:-GLIBC_2.0}" | sort -V | tail -1)
+          [ "$HIGHEST" = "GLIBC_2.28" ] || \
+            { echo "ERROR: artifact requires $MAX (> 2.28); build container is too new"; exit 1; }
+
+      # Arch-qualified filename: it's the exact name serious_python_linux's
+      # CMake downloads from releases, and it lets multi-arch artifacts
+      # coexist in caches and release pages.
       - name: Stage artifact with platform-tagged name
         run: |
           mkdir -p dist
