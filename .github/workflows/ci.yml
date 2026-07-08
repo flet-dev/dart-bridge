@@ -44,6 +44,7 @@ jobs:
       # be installed before actions/checkout — the action runs inside this
       # container and needs them.
       - name: Point apt at the Debian 10 archive (EOL distro)
+        shell: bash
         run: |
           printf '%s\n' \
             'deb http://archive.debian.org/debian buster main' \
@@ -52,7 +53,7 @@ jobs:
             > /etc/apt/sources.list
           echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until
           apt-get update
-          apt-get install -y build-essential curl ca-certificates git unzip
+          apt-get install -y build-essential curl ca-certificates git unzip file
 
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -63,6 +64,7 @@ jobs:
       # path needs 3.18+). Kitware's official binary tarballs are built against old
       # glibc, so a current CMake runs fine on buster.
       - name: Install modern CMake
+        shell: bash
         run: |
           set -euo pipefail
           CMAKE_VER=3.31.6
@@ -75,6 +77,7 @@ jobs:
       # libpython3.so to link against, so the artifact's DT_NEEDED stays
       # version-agnostic (one binary for every CPython 3.12+).
       - name: Download python-linux-dart for abi3 link target
+        shell: bash
         run: |
           set -euo pipefail
           PYVER=3.12   # any 3.12+ works; we only need headers + abi3 stub libpython3.so
@@ -87,6 +90,7 @@ jobs:
       # Plain Release build; the two -D vars point CMake at the headers and
       # stub downloaded above (skipping the local-dev find_package fallback).
       - name: Configure + build
+        shell: bash
         run: |
           cmake -B build -S . -DCMAKE_BUILD_TYPE=Release \
             -DDART_BRIDGE_PYTHON_INCLUDE_DIRS="${DART_BRIDGE_PYTHON_INCLUDE_DIRS}" \
@@ -98,6 +102,7 @@ jobs:
       # already provides the symbols. Guards against the linking mistake
       # where the .so builds fine but Py_Initialize crashes at dlopen time.
       - name: Verify DT_NEEDED includes libpython3.so
+        shell: bash
         run: |
           set -euo pipefail
           NEEDED=$(readelf -d build/libdart_bridge.so | grep NEEDED || true)
@@ -109,6 +114,7 @@ jobs:
       # glibc symbol newer than 2.28 (flet's lowest supported tier). This is
       # what a container bump would silently break — fail loudly instead.
       - name: Verify glibc floor is at most 2.28
+        shell: bash
         run: |
           set -euo pipefail
           MAX=$(objdump -T build/libdart_bridge.so | grep -oE 'GLIBC_2\.[0-9]+' | sort -V | tail -1)
@@ -121,6 +127,7 @@ jobs:
       # CMake downloads from releases, and it lets multi-arch artifacts
       # coexist in caches and release pages.
       - name: Stage artifact with platform-tagged name
+        shell: bash
         run: |
           mkdir -p dist
           cp build/libdart_bridge.so dist/libdart_bridge-linux-${{ matrix.arch }}.so
