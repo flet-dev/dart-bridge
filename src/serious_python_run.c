@@ -82,17 +82,24 @@ static int sp_pyrun_file(FILE *fp, const char *filename) {
 #if defined(_WIN32)
 #include <windows.h>
 #include <process.h>
+#include <wchar.h>
 #define EXPORT __declspec(dllexport)
 #define SP_PATH_SEP "\\"
 #define SP_PYPATH_SEP ";"
 static int sp_setenv(const char* k, const char* v) { return _putenv_s(k, v); }
+static int sp_unsetenv(const char* k) { return _putenv_s(k, ""); }
 #else
 #include <pthread.h>
 #include <unistd.h>
-#define EXPORT __attribute__((visibility("default")))
+// `used` is mainly for Darwin/Mach-O: dart_bridge is statically linked into
+// the host app, and some public entry points are discovered later via dlsym
+// / Dart FFI. Mark exported functions as used so the host linker's dead-strip
+// pass does not discard exports with no ordinary C call site.
+#define EXPORT __attribute__((visibility("default"), used))
 #define SP_PATH_SEP "/"
 #define SP_PYPATH_SEP ":"
 static int sp_setenv(const char* k, const char* v) { return setenv(k, v, 1); }
+static int sp_unsetenv(const char* k) { return unsetenv(k); }
 #endif
 
 // PyInit_dart_bridge lives in dart_bridge.c, linked into the same binary.
@@ -141,6 +148,14 @@ EXPORT int  serious_python_register_extension(const char* name, sp_pyinit_func_t
 EXPORT int  serious_python_run(const sp_run_config_t* cfg);
 EXPORT int  serious_python_request_stop(void);
 EXPORT void serious_python_finalize(void);
+EXPORT int  serious_python_is_mp_invocation(int argc, char** argv);
+EXPORT int  serious_python_main(int argc, char** argv);
+#if defined(_WIN32)
+// Wide-char variants for Windows hosts (wWinMain argv is wchar_t**; going
+// through the narrow versions would decode through the ANSI code page).
+EXPORT int  serious_python_is_mp_invocation_w(int argc, wchar_t** argv);
+EXPORT int  serious_python_main_w(int argc, wchar_t** argv);
+#endif
 
 // ---------------------------------------------------------------------------
 // Registered Python extensions (in addition to dart_bridge)
@@ -560,3 +575,129 @@ EXPORT void serious_python_finalize(void) {
         Py_Finalize();
     }
 }
+
+// ---------------------------------------------------------------------------
+// Multiprocessing child-process support
+//
+// Python's `multiprocessing` spawn/forkserver paths, plus the resource tracker,
+// launch helper processes by re-executing `sys.executable` with a CPython
+// command line. In serious_python-hosted apps, the launcher points
+// `sys.executable` at the host app binary, so those helpers would otherwise
+// start another GUI app instead of a headless Python interpreter.
+// See https://github.com/flet-dev/flet/issues/4283.
+//
+// The host runner should call `serious_python_is_mp_invocation` before any
+// UI/engine initialization. If it returns non-zero, the runner should exit with
+// `serious_python_main(argc, argv)`, turning the host binary into a plain
+// interpreter for that multiprocessing helper process only.
+//
+// Command-line shapes the detector is meant to catch:
+//
+//   spawn worker:      [exe, *flags, '-c', 'from multiprocessing.spawn import
+//                       spawn_main; spawn_main(...)', '--multiprocessing-fork']
+//   frozen-style:      [exe, '--multiprocessing-fork', 'k=v', ...]
+//   resource tracker:  [exe, *flags, '-c', 'from multiprocessing.
+//                       resource_tracker import main;main(fd)']
+//   forkserver:        [exe, *flags, '-c', 'from multiprocessing.forkserver
+//                       import main; ...']
+// ---------------------------------------------------------------------------
+
+static int sp_starts_with(const char* s, const char* prefix) {
+    return s && strncmp(s, prefix, strlen(prefix)) == 0;
+}
+
+EXPORT int serious_python_is_mp_invocation(int argc, char** argv) {
+    if (!argv) return 0;
+    for (int i = 1; i < argc; i++) {
+        if (!argv[i]) continue;
+        if (strcmp(argv[i], "--multiprocessing-fork") == 0) {
+            return 1;
+        }
+        if (strcmp(argv[i], "-c") == 0 && i + 1 < argc) {
+            const char* prog = argv[i + 1];
+            // intentionally kept broad/prefix-based to avoid hardcoding
+            if (sp_starts_with(prog, "from multiprocessing.") ||
+                sp_starts_with(prog, "import sys; from multiprocessing.")) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+// Shared preparation before handing the process to Py_Main/Py_BytesMain.
+// Returns 0 to proceed, non-zero exit code on a hard configuration error.
+static int sp_child_preflight(void) {
+    // Prevent re-exec'd multiprocessing children from inheriting PYTHONINSPECT,
+    // or they may stay open in interactive mode after the `-c` helper command finishes.
+    sp_unsetenv("PYTHONINSPECT");
+
+    if (!getenv("PYTHONHOME") && !getenv("PYTHONPATH")) {
+        fprintf(stderr,
+                "[serious_python_main] neither PYTHONHOME nor PYTHONPATH is "
+                "set; the embedded stdlib cannot be located. multiprocessing "
+                "children must inherit the host app's environment.\n");
+        return 64;
+    }
+
+    // Make the built-in dart_bridge module importable in the child too. The child
+    // normally should not talk to Dart, but inherited user/import paths may import
+    // dart_bridge-aware code; the import should fail soft rather than because the
+    // built-in module is missing. Must happen before Py_Main initializes Python.
+    if (PyImport_AppendInittab("dart_bridge", PyInit_dart_bridge) != 0) {
+        fprintf(stderr,
+                "[serious_python_main] inittab append failed for dart_bridge\n");
+        // Non-fatal: proceed without the builtin.
+    }
+    return 0;
+}
+
+// Run this process as a plain CPython interpreter for the given multiprocessing
+// command line. Returns the interpreter's exit code; the caller should exit the
+// process with it without running any other app code.
+//
+// The interpreter locates the embedded stdlib/site-packages through the
+// PYTHONHOME/PYTHONPATH environment variables inherited from the parent
+// process. The parent's `serious_python_run` sets them process-wide before
+// Py_Initialize, so multiprocessing children inherit them.
+EXPORT int serious_python_main(int argc, char** argv) {
+    int rc = sp_child_preflight();
+    if (rc != 0) return rc;
+
+    // Py_BytesMain (stable ABI, 3.8+) runs the full standard interpreter
+    // lifecycle: parses argv (-B/-s/-c/...), honors PYTHONHOME/PYTHONPATH,
+    // executes the '-c' payload with sys.argv = ['-c', *rest] (which is what
+    // multiprocessing.spawn.spawn_main asserts on), and returns the exit
+    // code after finalization.
+    return Py_BytesMain(argc, argv);
+}
+
+#if defined(_WIN32)
+static int sp_wstarts_with(const wchar_t* s, const wchar_t* prefix) {
+    return s && wcsncmp(s, prefix, wcslen(prefix)) == 0;
+}
+
+EXPORT int serious_python_is_mp_invocation_w(int argc, wchar_t** argv) {
+    if (!argv) return 0;
+    for (int i = 1; i < argc; i++) {
+        if (!argv[i]) continue;
+        if (wcscmp(argv[i], L"--multiprocessing-fork") == 0) {
+            return 1;
+        }
+        if (wcscmp(argv[i], L"-c") == 0 && i + 1 < argc) {
+            const wchar_t* prog = argv[i + 1];
+            if (sp_wstarts_with(prog, L"from multiprocessing.") ||
+                sp_wstarts_with(prog, L"import sys; from multiprocessing.")) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+EXPORT int serious_python_main_w(int argc, wchar_t** argv) {
+    int rc = sp_child_preflight();
+    if (rc != 0) return rc;
+    return Py_Main(argc, argv);
+}
+#endif
