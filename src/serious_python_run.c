@@ -86,8 +86,47 @@ static int sp_pyrun_file(FILE *fp, const char *filename) {
 #define EXPORT __declspec(dllexport)
 #define SP_PATH_SEP "\\"
 #define SP_PYPATH_SEP ";"
-static int sp_setenv(const char* k, const char* v) { return _putenv_s(k, v); }
-static int sp_unsetenv(const char* k) { return _putenv_s(k, ""); }
+// Dart passes FFI strings as UTF-8. On Windows, narrow CRT APIs interpret
+// char* paths and environment values using the process ANSI code page, so
+// non-ASCII paths can be corrupted. Convert to UTF-16 at the OS/CRT boundary
+// and use the wide APIs instead.
+static wchar_t* sp_utf8_to_wide(const char* s) {
+    if (!s) return NULL;
+    int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, NULL, 0);
+    if (wlen <= 0) return NULL;
+    if ((size_t)wlen > ((size_t)-1) / sizeof(wchar_t)) return NULL;
+    wchar_t* w = (wchar_t*)malloc((size_t)wlen * sizeof(wchar_t));
+    if (!w) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, w, wlen) <= 0) {
+        free(w);
+        return NULL;
+    }
+    return w;
+}
+static int sp_setenv(const char* k, const char* v) {
+    wchar_t* wk = sp_utf8_to_wide(k);
+    wchar_t* wv = sp_utf8_to_wide(v ? v : "");
+    int rc = -1;
+    if (wk && wv) rc = _wputenv_s(wk, wv);
+    free(wk);
+    free(wv);
+    return rc;
+}
+static int sp_unsetenv(const char* k) {
+    wchar_t* wk = sp_utf8_to_wide(k);
+    int rc = -1;
+    if (wk) rc = _wputenv_s(wk, L"");
+    free(wk);
+    return rc;
+}
+static int sp_getenv_present(const char* k) {
+    wchar_t* wk = sp_utf8_to_wide(k);
+    if (!wk) return 0;
+    size_t needed = 0;
+    errno_t rc = _wgetenv_s(&needed, NULL, 0, wk);
+    free(wk);
+    return rc == 0 && needed > 0;
+}
 #else
 #include <pthread.h>
 #include <unistd.h>
@@ -100,6 +139,7 @@ static int sp_unsetenv(const char* k) { return _putenv_s(k, ""); }
 #define SP_PYPATH_SEP ":"
 static int sp_setenv(const char* k, const char* v) { return setenv(k, v, 1); }
 static int sp_unsetenv(const char* k) { return unsetenv(k); }
+static int sp_getenv_present(const char* k) { return getenv(k) != NULL; }
 #endif
 
 // PyInit_dart_bridge lives in dart_bridge.c, linked into the same binary.
@@ -262,12 +302,19 @@ static sp_state_t* sp_state_from_config(const sp_run_config_t* cfg) {
 // Python lifecycle
 // ---------------------------------------------------------------------------
 
-// Apply env vars BEFORE Py_Initialize so PYTHONHOME / PYTHONPATH / etc. are
-// observed during interpreter startup.
-static void sp_apply_env(sp_state_t* st) {
+// Apply env vars before Python startup so PYTHONHOME, PYTHONPATH, and runtime
+// bridge ports are visible during initialization. Treat failures as fatal;
+// continuing with a partially configured embedded interpreter gives misleading
+// startup errors.
+static int sp_apply_env(sp_state_t* st) {
     for (size_t i = 0; i < st->env_count; i++) {
-        sp_setenv(st->env_keys[i], st->env_values[i]);
+        if (sp_setenv(st->env_keys[i], st->env_values[i]) != 0) {
+            fprintf(stderr, "[serious_python_run] failed to set env var %s\n",
+                    st->env_keys[i] ? st->env_keys[i] : "<null>");
+            return -1;
+        }
     }
+    return 0;
 }
 
 // Register dart_bridge + any user-registered extensions with the inittab.
@@ -355,7 +402,17 @@ static int sp_run_target(sp_state_t* st) {
     }
     // SP_RUN_PATH
     if (!st->app_path) return 1;
+#if defined(_WIN32)
+    wchar_t* wpath = sp_utf8_to_wide(st->app_path);
+    FILE* fp = NULL;
+    if (wpath) {
+        errno_t err = _wfopen_s(&fp, wpath, L"rb");
+        if (err != 0) fp = NULL;
+    }
+    free(wpath);
+#else
     FILE* fp = fopen(st->app_path, "rb");
+#endif
     if (!fp) {
         fprintf(stderr, "[serious_python_run] cannot open %s\n", st->app_path);
         return 1;
@@ -432,12 +489,16 @@ static int sp_run_python(sp_state_t* st) {
     //    FletDartBridgeServer restart loop, the python.dart sys.exit
     //    patcher) can rewire to them.
     if (Py_IsInitialized()) {
-        sp_apply_env(st);
+        if (sp_apply_env(st) != 0) {
+            return 1;
+        }
         sp_signal_session_from_env(st);
         return 0;
     }
 
-    sp_apply_env(st);
+    if (sp_apply_env(st) != 0) {
+        return 1;
+    }
 
     if (sp_apply_inittab() != 0) {
         return 1;
@@ -461,6 +522,26 @@ static int sp_run_python(sp_state_t* st) {
         }
     }
 #else
+#if defined(_WIN32)
+    // Force Python UTF-8 Mode before Py_Initialize so the embedded interpreter
+    // uses UTF-8 for default text encoding on Windows locales whose ANSI code
+    // page is not UTF-8. PyPreConfig would be the modern API, but this path is
+    // built with Py_LIMITED_API, where PyPreConfig is unavailable.
+#if defined(_MSC_VER)
+#  pragma warning(push)
+#  pragma warning(disable : 4996)
+#elif defined(__GNUC__) || defined(__clang__)
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    Py_UTF8Mode = 1;
+#if defined(_MSC_VER)
+#  pragma warning(pop)
+#elif defined(__GNUC__) || defined(__clang__)
+#  pragma GCC diagnostic pop
+#endif
+#endif
+
     Py_Initialize();
 
     if (!Py_IsInitialized()) {
@@ -632,7 +713,14 @@ static int sp_child_preflight(void) {
     // or they may stay open in interactive mode after the `-c` helper command finishes.
     sp_unsetenv("PYTHONINSPECT");
 
-    if (!getenv("PYTHONHOME") && !getenv("PYTHONPATH")) {
+#if defined(_WIN32)
+    // Py_Main/Py_BytesMain run their own pre-initialization and read PYTHONUTF8
+    // from the environment. Set it here so multiprocessing helper processes
+    // match the parent interpreter's UTF-8 behavior.
+    sp_setenv("PYTHONUTF8", "1");
+#endif
+
+    if (!sp_getenv_present("PYTHONHOME") && !sp_getenv_present("PYTHONPATH")) {
         fprintf(stderr,
                 "[serious_python_main] neither PYTHONHOME nor PYTHONPATH is "
                 "set; the embedded stdlib cannot be located. multiprocessing "

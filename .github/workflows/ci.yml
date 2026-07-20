@@ -1,12 +1,12 @@
 name: CI
 
 # Single workflow for both branch/PR validation and tagged-release publish.
-# - push to main / PR / workflow_dispatch  → build all 4 platforms, upload artifacts
-# - tag push (v*.*.*)                       → build + attach artifacts to GitHub Release
+# - push to any branch / PR / workflow_dispatch → build all 4 platforms, upload artifacts
+# - tag push (v*.*.*)                           → build + attach artifacts to GitHub Release
 
 on:
   push:
-    branches: [main]
+    branches: ['**']
     tags: ['v*.*.*']
   pull_request:
   workflow_dispatch:
