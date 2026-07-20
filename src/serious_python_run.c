@@ -86,8 +86,38 @@ static int sp_pyrun_file(FILE *fp, const char *filename) {
 #define EXPORT __declspec(dllexport)
 #define SP_PATH_SEP "\\"
 #define SP_PYPATH_SEP ";"
-static int sp_setenv(const char* k, const char* v) { return _putenv_s(k, v); }
-static int sp_unsetenv(const char* k) { return _putenv_s(k, ""); }
+// Dart passes strings across FFI as UTF-8. On Windows, narrow CRT filesystem
+// and environment APIs reinterpret those bytes through the active ANSI code
+// page, corrupting paths such as C:\Users\Jürgen\... Use wide APIs at the
+// Windows boundary instead. See flet-dev/flet#6641.
+static wchar_t* sp_utf8_to_wide(const char* s) {
+    if (!s) return NULL;
+    int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, NULL, 0);
+    if (wlen <= 0) return NULL;
+    wchar_t* w = (wchar_t*)malloc((size_t)wlen * sizeof(wchar_t));
+    if (!w) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, w, wlen) <= 0) {
+        free(w);
+        return NULL;
+    }
+    return w;
+}
+static int sp_setenv(const char* k, const char* v) {
+    wchar_t* wk = sp_utf8_to_wide(k);
+    wchar_t* wv = sp_utf8_to_wide(v ? v : "");
+    int rc = -1;
+    if (wk && wv) rc = _wputenv_s(wk, wv);
+    free(wk);
+    free(wv);
+    return rc;
+}
+static int sp_unsetenv(const char* k) {
+    wchar_t* wk = sp_utf8_to_wide(k);
+    int rc = -1;
+    if (wk) rc = _wputenv_s(wk, L"");
+    free(wk);
+    return rc;
+}
 #else
 #include <pthread.h>
 #include <unistd.h>
@@ -355,7 +385,17 @@ static int sp_run_target(sp_state_t* st) {
     }
     // SP_RUN_PATH
     if (!st->app_path) return 1;
+#if defined(_WIN32)
+    wchar_t* wpath = sp_utf8_to_wide(st->app_path);
+    FILE* fp = NULL;
+    if (wpath) {
+        errno_t err = _wfopen_s(&fp, wpath, L"rb");
+        if (err != 0) fp = NULL;
+    }
+    free(wpath);
+#else
     FILE* fp = fopen(st->app_path, "rb");
+#endif
     if (!fp) {
         fprintf(stderr, "[serious_python_run] cannot open %s\n", st->app_path);
         return 1;
@@ -461,6 +501,25 @@ static int sp_run_python(sp_state_t* st) {
         }
     }
 #else
+#if defined(_WIN32)
+    // Force UTF-8 Mode before Py_Initialize so Python's default text encoding
+    // is UTF-8 on non-UTF-8 Windows locales. PyPreConfig would be cleaner, but
+    // this desktop path uses Py_LIMITED_API where PyPreConfig is unavailable.
+#if defined(_MSC_VER)
+#  pragma warning(push)
+#  pragma warning(disable : 4996)
+#elif defined(__GNUC__) || defined(__clang__)
+#  pragma GCC diagnostic push
+#  pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+    Py_UTF8Mode = 1;
+#if defined(_MSC_VER)
+#  pragma warning(pop)
+#elif defined(__GNUC__) || defined(__clang__)
+#  pragma GCC diagnostic pop
+#endif
+#endif
+
     Py_Initialize();
 
     if (!Py_IsInitialized()) {
@@ -631,6 +690,12 @@ static int sp_child_preflight(void) {
     // Prevent re-exec'd multiprocessing children from inheriting PYTHONINSPECT,
     // or they may stay open in interactive mode after the `-c` helper command finishes.
     sp_unsetenv("PYTHONINSPECT");
+
+#if defined(_WIN32)
+    // Py_Main/Py_BytesMain read PYTHONUTF8 during their own pre-initialization;
+    // match the parent embedded interpreter for multiprocessing helpers.
+    sp_setenv("PYTHONUTF8", "1");
+#endif
 
     if (!getenv("PYTHONHOME") && !getenv("PYTHONPATH")) {
         fprintf(stderr,
