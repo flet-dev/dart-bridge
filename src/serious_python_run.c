@@ -86,10 +86,10 @@ static int sp_pyrun_file(FILE *fp, const char *filename) {
 #define EXPORT __declspec(dllexport)
 #define SP_PATH_SEP "\\"
 #define SP_PYPATH_SEP ";"
-// Dart passes strings across FFI as UTF-8. On Windows, narrow CRT filesystem
-// and environment APIs reinterpret those bytes through the active ANSI code
-// page, corrupting paths such as C:\Users\Jürgen\... Use wide APIs at the
-// Windows boundary instead. See flet-dev/flet#6641.
+// Dart passes FFI strings as UTF-8. On Windows, narrow CRT APIs interpret
+// char* paths and environment values using the process ANSI code page, so
+// non-ASCII paths can be corrupted. Convert to UTF-16 at the OS/CRT boundary
+// and use the wide APIs instead.
 static wchar_t* sp_utf8_to_wide(const char* s) {
     if (!s) return NULL;
     int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, NULL, 0);
@@ -292,8 +292,10 @@ static sp_state_t* sp_state_from_config(const sp_run_config_t* cfg) {
 // Python lifecycle
 // ---------------------------------------------------------------------------
 
-// Apply env vars BEFORE Py_Initialize so PYTHONHOME / PYTHONPATH / etc. are
-// observed during interpreter startup.
+// Apply env vars before Python startup so PYTHONHOME, PYTHONPATH, and runtime
+// bridge ports are visible during initialization. Treat failures as fatal;
+// continuing with a partially configured embedded interpreter gives misleading
+// startup errors.
 static int sp_apply_env(sp_state_t* st) {
     for (size_t i = 0; i < st->env_count; i++) {
         if (sp_setenv(st->env_keys[i], st->env_values[i]) != 0) {
@@ -511,9 +513,10 @@ static int sp_run_python(sp_state_t* st) {
     }
 #else
 #if defined(_WIN32)
-    // Force UTF-8 Mode before Py_Initialize so Python's default text encoding
-    // is UTF-8 on non-UTF-8 Windows locales. PyPreConfig would be cleaner, but
-    // this desktop path uses Py_LIMITED_API where PyPreConfig is unavailable.
+    // Force Python UTF-8 Mode before Py_Initialize so the embedded interpreter
+    // uses UTF-8 for default text encoding on Windows locales whose ANSI code
+    // page is not UTF-8. PyPreConfig would be the modern API, but this path is
+    // built with Py_LIMITED_API, where PyPreConfig is unavailable.
 #if defined(_MSC_VER)
 #  pragma warning(push)
 #  pragma warning(disable : 4996)
@@ -701,8 +704,9 @@ static int sp_child_preflight(void) {
     sp_unsetenv("PYTHONINSPECT");
 
 #if defined(_WIN32)
-    // Py_Main/Py_BytesMain read PYTHONUTF8 during their own pre-initialization;
-    // match the parent embedded interpreter for multiprocessing helpers.
+    // Py_Main/Py_BytesMain run their own pre-initialization and read PYTHONUTF8
+    // from the environment. Set it here so multiprocessing helper processes
+    // match the parent interpreter's UTF-8 behavior.
     sp_setenv("PYTHONUTF8", "1");
 #endif
 
