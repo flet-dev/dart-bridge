@@ -94,6 +94,7 @@ static wchar_t* sp_utf8_to_wide(const char* s) {
     if (!s) return NULL;
     int wlen = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, NULL, 0);
     if (wlen <= 0) return NULL;
+    if ((size_t)wlen > ((size_t)-1) / sizeof(wchar_t)) return NULL;
     wchar_t* w = (wchar_t*)malloc((size_t)wlen * sizeof(wchar_t));
     if (!w) return NULL;
     if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, w, wlen) <= 0) {
@@ -118,6 +119,14 @@ static int sp_unsetenv(const char* k) {
     free(wk);
     return rc;
 }
+static int sp_getenv_present(const char* k) {
+    wchar_t* wk = sp_utf8_to_wide(k);
+    if (!wk) return 0;
+    size_t needed = 0;
+    errno_t rc = _wgetenv_s(&needed, NULL, 0, wk);
+    free(wk);
+    return rc == 0 && needed > 0;
+}
 #else
 #include <pthread.h>
 #include <unistd.h>
@@ -130,6 +139,7 @@ static int sp_unsetenv(const char* k) {
 #define SP_PYPATH_SEP ":"
 static int sp_setenv(const char* k, const char* v) { return setenv(k, v, 1); }
 static int sp_unsetenv(const char* k) { return unsetenv(k); }
+static int sp_getenv_present(const char* k) { return getenv(k) != NULL; }
 #endif
 
 // PyInit_dart_bridge lives in dart_bridge.c, linked into the same binary.
@@ -710,7 +720,7 @@ static int sp_child_preflight(void) {
     sp_setenv("PYTHONUTF8", "1");
 #endif
 
-    if (!getenv("PYTHONHOME") && !getenv("PYTHONPATH")) {
+    if (!sp_getenv_present("PYTHONHOME") && !sp_getenv_present("PYTHONPATH")) {
         fprintf(stderr,
                 "[serious_python_main] neither PYTHONHOME nor PYTHONPATH is "
                 "set; the embedded stdlib cannot be located. multiprocessing "
