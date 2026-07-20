@@ -294,10 +294,15 @@ static sp_state_t* sp_state_from_config(const sp_run_config_t* cfg) {
 
 // Apply env vars BEFORE Py_Initialize so PYTHONHOME / PYTHONPATH / etc. are
 // observed during interpreter startup.
-static void sp_apply_env(sp_state_t* st) {
+static int sp_apply_env(sp_state_t* st) {
     for (size_t i = 0; i < st->env_count; i++) {
-        sp_setenv(st->env_keys[i], st->env_values[i]);
+        if (sp_setenv(st->env_keys[i], st->env_values[i]) != 0) {
+            fprintf(stderr, "[serious_python_run] failed to set env var %s\n",
+                    st->env_keys[i] ? st->env_keys[i] : "<null>");
+            return -1;
+        }
     }
+    return 0;
 }
 
 // Register dart_bridge + any user-registered extensions with the inittab.
@@ -472,12 +477,16 @@ static int sp_run_python(sp_state_t* st) {
     //    FletDartBridgeServer restart loop, the python.dart sys.exit
     //    patcher) can rewire to them.
     if (Py_IsInitialized()) {
-        sp_apply_env(st);
+        if (sp_apply_env(st) != 0) {
+            return 1;
+        }
         sp_signal_session_from_env(st);
         return 0;
     }
 
-    sp_apply_env(st);
+    if (sp_apply_env(st) != 0) {
+        return 1;
+    }
 
     if (sp_apply_inittab() != 0) {
         return 1;
