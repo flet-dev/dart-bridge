@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.6.1
+
+### Apple: preserve framework symlinks in the published zip
+
+`apple/build_xcframework.sh` now zips with `-y`, storing symlinks as symlinks.
+
+Without it `zip` follows symlinks, so the macOS slice's versioned bundle —
+`Versions/Current -> A`, `dart_bridge -> Versions/Current/dart_bridge`,
+`Resources -> Versions/Current/Resources` — extracted as real files and
+directories (and stored the dylib three times). The result is a malformed
+framework: macOS builds failed with `Couldn't resolve framework symlink for
+.../Versions/Current` and `code object is not signed at all` /
+`Command CodeSign failed with a nonzero exit code`.
+
+Only macOS was affected — the iOS slices use a flat framework layout with no
+symlinks, which is why iOS builds against 1.6.0 succeeded. The compiled binaries
+are identical to 1.6.0; only the packaging of the published artifact changed.
+
 ## 1.6.0
 
 ### Apple: `dart_bridge.xcframework` is now a dynamic framework

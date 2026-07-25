@@ -161,7 +161,14 @@ xcodebuild -create-xcframework \
   -output "$DIST/${FW_NAME}.xcframework"
 
 echo "--- Zipping artifact ---"
-(cd "$DIST" && zip -qr "${FW_NAME}-apple.xcframework.zip" "${FW_NAME}.xcframework")
+# -y stores symlinks AS symlinks. Without it zip follows them, and the macOS
+# slice's versioned bundle (`Versions/Current -> A`, `dart_bridge ->
+# Versions/Current/dart_bridge`, `Resources -> Versions/Current/Resources`)
+# extracts as real files/directories — a malformed framework that macOS codesign
+# rejects ("Couldn't resolve framework symlink for .../Versions/Current",
+# "code object is not signed at all"), and that stores the dylib three times.
+# iOS uses a flat layout with no symlinks, so only macOS was affected.
+(cd "$DIST" && zip -qry "${FW_NAME}-apple.xcframework.zip" "${FW_NAME}.xcframework")
 
 echo "Done: $DIST/${FW_NAME}-apple.xcframework.zip"
 ls -lh "$DIST/${FW_NAME}-apple.xcframework.zip"
