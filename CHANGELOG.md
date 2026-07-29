@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.7.0
+
+### Apple: the published xcframework is provider-signed
+
+`dart_bridge.xcframework` is now code-signed with the Flet publishing team's
+Apple Distribution identity, with a secure timestamp, before it is zipped.
+
+Xcode records the state of every `.xcframework` an app links against **as its
+publisher shipped it**, and writes that into the IPA as
+`Signatures/dart_bridge.xcframework-ios.signature`. An unsigned xcframework makes
+that receipt read `signed = false` / `isSecureTimestamp = false`, which Apple's
+App Store scan reports as `ITMS-91065: Missing signature`. Signing the app does
+not fill this in — Xcode re-signs the *embedded copy* with the submitting team's
+identity, and the SDK-origin receipt is a separate record.
+
+`apple/xcframework_signing.sh` holds the signing and verification helpers.
+Signing happens after `xcodebuild -create-xcframework` and before the zip — the
+last point at which the bundle is complete and unmutated — and the signature is
+verified again after the zip is extracted into a fresh directory, so an archiving
+bug shows up here rather than in a consumer's app.
+
+Release builds run in an isolated `release-signing` CI job that imports the
+certificate into a temporary keychain, derives exactly one identity fingerprint,
+and deletes the keychain unconditionally. The general build matrix (every push and
+PR) has no access to the certificate and still produces unsigned artifacts for
+testing; those are skipped on tags and can no longer reach a release.
+
+The outer seal is stamped with `-i dev.flet.dartbridge`, read off the inner
+framework's own `CFBundleIdentifier`. An `.xcframework`'s root `Info.plist` is an
+`XFWK` manifest with no `CFBundleIdentifier` of its own, so without this codesign
+falls back to the bundle's file name and the seal reports a bare
+`Identifier=dart_bridge`. Verification asserts the two agree, which also catches a
+re-sign that dropped the flag.
+
+`dev.flet.dartbridge` is otherwise unchanged — it was already a stable,
+publisher-owned identifier, which is what lets one signature cover every app that
+embeds it. The compiled binaries are identical to 1.6.1; only the packaging of the
+published artifact changed.
+
 ## 1.6.1
 
 ### Apple: preserve framework symlinks in the published zip
