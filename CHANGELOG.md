@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.7.0
 
 ### Apple: the published xcframework is provider-signed
 
@@ -27,8 +27,17 @@ and deletes the keychain unconditionally. The general build matrix (every push a
 PR) has no access to the certificate and still produces unsigned artifacts for
 testing; those are skipped on tags and can no longer reach a release.
 
-`dev.flet.dartbridge` is unchanged — it was already a stable, publisher-owned
-identifier, which is what lets one signature cover every app that embeds it.
+The outer seal is stamped with `-i dev.flet.dartbridge`, read off the inner
+framework's own `CFBundleIdentifier`. An `.xcframework`'s root `Info.plist` is an
+`XFWK` manifest with no `CFBundleIdentifier` of its own, so without this codesign
+falls back to the bundle's file name and the seal reports a bare
+`Identifier=dart_bridge`. Verification asserts the two agree, which also catches a
+re-sign that dropped the flag.
+
+`dev.flet.dartbridge` is otherwise unchanged — it was already a stable,
+publisher-owned identifier, which is what lets one signature cover every app that
+embeds it. The compiled binaries are identical to 1.6.1; only the packaging of the
+published artifact changed.
 
 ## 1.6.1
 

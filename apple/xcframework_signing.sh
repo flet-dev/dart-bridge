@@ -112,15 +112,56 @@ xcf_find() {
     done
 }
 
+# The identifier to seal the OUTER bundle under.
+#
+# An .xcframework's root Info.plist is an XFWK manifest: it carries
+# AvailableLibraries, CFBundlePackageType and XCFrameworkFormatVersion, and no
+# CFBundleIdentifier at all. Left alone, codesign falls back to the bundle's file
+# name, so the seal reports a bare `Identifier=dart_bridge` instead of a
+# reverse-DNS one. Read the identifier off the xcframework's own inner framework
+# instead: it is already stable and provider-owned in every artifact we publish,
+# so the outer seal and the framework it wraps agree by construction and neither
+# depends on the consuming application.
+xcf_signing_identifier() {
+    local xcf=$1
+    local name plist ident
+    name=$(basename "$xcf" .xcframework)
+
+    local slice
+    for slice in "$xcf"/*/; do
+        [ -d "$slice$name.framework" ] || continue
+        # Flat (iOS) layout, then versioned (macOS). Versions/Current is a
+        # symlink to the real version directory, so skip it.
+        for plist in "$slice$name.framework/Info.plist" \
+                     "$slice$name.framework"/Versions/*/Resources/Info.plist; do
+            [ -f "$plist" ] || continue
+            case "$plist" in */Versions/Current/*) continue ;; esac
+            ident=$(plutil -extract CFBundleIdentifier raw -o - "$plist" 2>/dev/null) || continue
+            if [ -n "$ident" ]; then
+                printf '%s' "$ident"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
 # Sign one completed outer XCFramework.
 xcf_sign_one() {
     local xcf=$1
     [ -d "$xcf" ] || { xcf_err "not a directory: $xcf"; return 1; }
 
-    local args=(--force --timestamp --sign "$XCFRAMEWORK_CODESIGN_IDENTITY")
+    local ident
+    if ! ident=$(xcf_signing_identifier "$xcf"); then
+        xcf_err "$xcf: no inner framework Info.plist with a CFBundleIdentifier;" \
+                "cannot derive a signing identifier"
+        return 1
+    fi
+
+    local args=(--force --timestamp -i "$ident" --sign "$XCFRAMEWORK_CODESIGN_IDENTITY")
     [ -n "${XCFRAMEWORK_SIGNING_KEYCHAIN:-}" ] && args+=(--keychain "$XCFRAMEWORK_SIGNING_KEYCHAIN")
 
-    xcf_log "signing $xcf"
+    xcf_log "signing $xcf as $ident"
     # Deliberately no --deep: it re-signs nested code with the outer options and
     # is documented by Apple as inappropriate for producing a distributable
     # signature. Deliberately no --timestamp=none: the receipt's
@@ -176,6 +217,18 @@ xcf_verify_one() {
         actual_team=$(printf '%s\n' "$info" | sed -n 's/^TeamIdentifier=//p' | head -1)
         if [ "$actual_team" != "$expect_team" ]; then
             xcf_err "$xcf: TeamIdentifier '$actual_team' != expected '$expect_team'"
+            return 1
+        fi
+    fi
+
+    # The outer seal must name the same provider-owned identifier as the inner
+    # framework. A mismatch means the bundle was re-signed by something that did
+    # not pass -i, and fell back to the file name.
+    local expect_ident actual_ident
+    if expect_ident=$(xcf_signing_identifier "$xcf"); then
+        actual_ident=$(printf '%s\n' "$info" | sed -n 's/^Identifier=//p' | head -1)
+        if [ "$actual_ident" != "$expect_ident" ]; then
+            xcf_err "$xcf: signing identifier '$actual_ident' != inner framework's '$expect_ident'"
             return 1
         fi
     fi
