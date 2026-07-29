@@ -301,7 +301,11 @@ jobs:
           path: dist/libdart_bridge-android-${{ matrix.abi }}-py${{ matrix.python_version }}.so
           if-no-files-found: error
 
+  # Unprivileged Apple build: no signing credentials are available here, so the
+  # artifact it produces is UNSIGNED and deliberately not publishable. Skipped on
+  # tags so a release run cannot possibly pick it up (see build-apple-signed).
   build-apple:
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -329,15 +333,124 @@ jobs:
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: dart_bridge-apple-xcframework
+          name: dart_bridge-apple-xcframework-unsigned
           path: dist/dart_bridge-apple.xcframework.zip
           if-no-files-found: error
+
+  # Release-only Apple build. Isolated from the general matrix so the provider
+  # certificate is never present in a PR or branch run: the `release-signing`
+  # environment holds the secrets and can carry branch/tag protection rules.
+  #
+  # Xcode records the SDK-origin signature of every XCFramework an app links
+  # against into the IPA's Signatures/ receipts. An unsigned dart_bridge makes
+  # that receipt read `signed = false`, which Apple's scan reports as
+  # ITMS-91065. Hence: no unsigned Apple artifact may ever reach a release.
+  build-apple-signed:
+    name: build-apple (provider-signed)
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: macos-latest
+    environment: release-signing
+    env:
+      XCFRAMEWORK_EXPECTED_TEAM_ID: ${{ vars.XCFRAMEWORK_EXPECTED_TEAM_ID }}
+      # Turns every "credentials missing / signature not verifiable" case into a
+      # build failure instead of a silent unsigned artifact.
+      REQUIRE_XCFRAMEWORK_SIGNATURE: '1'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Download Python iOS dist (headers)
+        run: |
+          set -euo pipefail
+          VER=3.12  # abi3: any 3.12+ headers work
+          curl -fL -o pyios.tar.gz \
+            "https://github.com/flet-dev/python-build/releases/download/v${VER}/python-ios-dart-${VER}.tar.gz"
+          mkdir -p pyios && tar -xzf pyios.tar.gz -C pyios
+          HEADER_DIR=$(find pyios -name Python.h -exec dirname {} \; | head -n1)
+          echo "PYTHON_HEADERS_DIR=$HEADER_DIR" >> "$GITHUB_ENV"
+
+      - name: Import Apple Distribution certificate into a temporary keychain
+        env:
+          CERT_P12_BASE64: ${{ secrets.APPLE_DISTRIBUTION_CERT_P12_BASE64 }}
+          CERT_P12_PASSWORD: ${{ secrets.APPLE_DISTRIBUTION_CERT_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${CERT_P12_BASE64:?APPLE_DISTRIBUTION_CERT_P12_BASE64 is not set}"
+          : "${CERT_P12_PASSWORD:?APPLE_DISTRIBUTION_CERT_P12_PASSWORD is not set}"
+
+          KEYCHAIN_PATH="$RUNNER_TEMP/xcframework-signing.keychain-db"
+          CERT_PATH="$RUNNER_TEMP/xcframework-signing.p12"
+          # Ephemeral: the keychain lives for this job only and is deleted in the
+          # always-run cleanup step, so the password never needs to leave it.
+          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
+
+          printf '%s' "$CERT_P12_BASE64" | base64 --decode > "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          # No -A: the private key is reachable only by the two Apple tools named
+          # below, not by any process that happens to run in this job.
+          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$CERT_P12_PASSWORD" \
+            -f pkcs12 -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" >/dev/null
+
+          # codesign resolves an identity through the search list even when
+          # --keychain is passed, so prepend ours to the user list.
+          security list-keychains -d user -s "$KEYCHAIN_PATH" \
+            $(security list-keychains -d user | tr -d '"')
+
+          # Derive EXACTLY ONE fingerprint. Selecting by display name is
+          # ambiguous when a keychain holds more than one matching certificate,
+          # and codesign then picks arbitrarily; a hard count check makes a
+          # multi-certificate .p12 a build failure instead of a coin flip.
+          IDENTITIES=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH")
+          echo "$IDENTITIES"
+          FPRS=$(printf '%s\n' "$IDENTITIES" \
+                   | sed -n 's/^ *[0-9]*) \([0-9A-F]\{40\}\) .*/\1/p' | sort -u)
+          COUNT=$(printf '%s' "$FPRS" | grep -c . || true)
+          if [ "$COUNT" -ne 1 ]; then
+            echo "::error::expected exactly 1 codesigning identity in the imported keychain, found $COUNT"
+            exit 1
+          fi
+
+          # Fingerprint and keychain path are not secrets.
+          echo "XCFRAMEWORK_CODESIGN_IDENTITY=$FPRS" >> "$GITHUB_ENV"
+          echo "XCFRAMEWORK_SIGNING_KEYCHAIN=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+
+      # build_xcframework.sh signs the completed xcframework, verifies it, zips
+      # it, then extracts the zip into a fresh directory and verifies again.
+      - name: Build + sign xcframework
+        run: ./apple/build_xcframework.sh
+
+      - name: Inspect artifact
+        run: |
+          ls -la dist/
+          du -sh dist/dart_bridge-apple.xcframework.zip
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dart_bridge-apple-xcframework-signed
+          path: dist/dart_bridge-apple.xcframework.zip
+          if-no-files-found: error
+
+      - name: Remove temporary keychain and certificate
+        if: always()
+        run: |
+          security delete-keychain "$RUNNER_TEMP/xcframework-signing.keychain-db" 2>/dev/null || true
+          rm -f "$RUNNER_TEMP/xcframework-signing.p12"
 
   # Tag-gated publish: collects every build job's artifacts and attaches
   # them to a GitHub Release named after the pushed tag. Skipped for
   # branch / PR runs.
   publish:
-    needs: [build-linux, build-windows, build-android, build-apple]
+    # build-apple-signed, never build-apple: the unsigned Apple job does not run
+    # on tags at all, and depending on the signed job here means a signing
+    # failure blocks the release rather than degrading it to an unsigned zip.
+    needs: [build-linux, build-windows, build-android, build-apple-signed]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -349,7 +462,22 @@ jobs:
 
       - name: Flatten artifacts into one dir
         run: |
+          set -euo pipefail
           mkdir -p dist
+
+          # Belt and braces: build-apple is `if:`-skipped on tags, so an
+          # unsigned Apple artifact should not exist in this run. If one somehow
+          # does, fail rather than let the two same-named zips race for the same
+          # destination filename.
+          if [ -d artifacts/dart_bridge-apple-xcframework-unsigned ]; then
+            echo "::error::an UNSIGNED Apple artifact is present in a release run; refusing to publish"
+            exit 1
+          fi
+          if [ ! -f artifacts/dart_bridge-apple-xcframework-signed/dart_bridge-apple.xcframework.zip ]; then
+            echo "::error::signed Apple artifact missing; refusing to publish"
+            exit 1
+          fi
+
           find artifacts -type f \( -name '*.so' -o -name '*.dll' -o -name '*.zip' \) -exec cp {} dist/ \;
           echo "=== Release payload ==="
           ls -lh dist/

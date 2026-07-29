@@ -24,6 +24,10 @@
 #     link time, now deferred to load time instead.
 #
 # Output: dist/dart_bridge.xcframework + dist/dart_bridge-apple.xcframework.zip
+#
+# Release builds additionally provider-sign the outer xcframework; see
+# apple/xcframework_signing.sh for the environment it reads. Builds without those
+# credentials still succeed and produce an unsigned (non-publishable) artifact.
 
 set -euo pipefail
 
@@ -31,6 +35,15 @@ cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
 : "${PYTHON_HEADERS_DIR:?Set PYTHON_HEADERS_DIR to a dir containing Python.h}"
+
+# shellcheck source=apple/xcframework_signing.sh
+. "$ROOT/apple/xcframework_signing.sh"
+
+# Validate signing credentials before compiling: a release run that lost its
+# certificate should fail in seconds, not after three slice builds.
+preflight_rc=0
+xcf_signing_preflight || preflight_rc=$?
+[ "$preflight_rc" -le 1 ] || exit 1
 
 BUILD="$ROOT/build/apple"
 DIST="$ROOT/dist"
@@ -160,6 +173,18 @@ xcodebuild -create-xcframework \
   -framework "$BUILD/macosx/${FW_NAME}.framework" \
   -output "$DIST/${FW_NAME}.xcframework"
 
+# --- Provider signature ---------------------------------------------------
+# Last mutation of the bundle. `xcodebuild -create-xcframework` is the final
+# step that writes into it, and the zip below only reads — so this is the one
+# point where the artifact is both complete and still unsigned. Anything added
+# between here and the zip would break the seal.
+#
+# dart_bridge already carries the stable provider identifier dev.flet.dartbridge
+# (BUNDLE_ID above); it is never rewritten per consuming application, which is
+# what lets one signature cover every app that embeds it.
+echo "--- Signing xcframework ---"
+xcf_sign_tree "$DIST/${FW_NAME}.xcframework"
+
 echo "--- Zipping artifact ---"
 # -y stores symlinks AS symlinks. Without it zip follows them, and the macOS
 # slice's versioned bundle (`Versions/Current -> A`, `dart_bridge ->
@@ -169,6 +194,17 @@ echo "--- Zipping artifact ---"
 # "code object is not signed at all"), and that stores the dylib three times.
 # iOS uses a flat layout with no symlinks, so only macOS was affected.
 (cd "$DIST" && zip -qry "${FW_NAME}-apple.xcframework.zip" "${FW_NAME}.xcframework")
+
+# --- Round-trip verification ----------------------------------------------
+# The published artifact is the ZIP, not the directory we just signed, so verify
+# what consumers actually get. This is the check that would have caught the
+# symlink-flattening bug fixed in 1.6.1 as a signature failure rather than as a
+# codesign error in someone else's app.
+echo "--- Verifying signature after archive round trip ---"
+roundtrip_dir=$(mktemp -d)
+trap 'rm -rf "$roundtrip_dir"' EXIT
+unzip -q "$DIST/${FW_NAME}-apple.xcframework.zip" -d "$roundtrip_dir"
+xcf_verify_tree "$roundtrip_dir/${FW_NAME}.xcframework"
 
 echo "Done: $DIST/${FW_NAME}-apple.xcframework.zip"
 ls -lh "$DIST/${FW_NAME}-apple.xcframework.zip"
