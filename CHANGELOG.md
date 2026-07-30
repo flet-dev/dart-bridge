@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.7.1
+
+### Apple: sign the inner frameworks too, not just the outer xcframework
+
+1.7.0 signed `dart_bridge.xcframework` but left the `dart_bridge.framework`
+bundles inside each slice unsigned. That is not enough.
+
+An IPA built against 1.7.0 produced a receipt reading `signed = true` but
+`isSecureTimestamp = false`, even though the outer seal carries a genuine Apple
+TSA timestamp. Comparing against an XCFramework Apple's App Store scan
+demonstrably accepts — [krzyzanowskim/OpenSSL](https://github.com/krzyzanowskim/OpenSSL)
+3.6.3000 — every one of its ten slices carries its own Apple Distribution
+signature with a secure timestamp, and the outer bundle is signed afterwards.
+An unsigned inner framework was the only structural difference left between that
+artifact and ours.
+
+`xcf_sign_one` now signs each slice's `.framework` first and the outer bundle
+last. The order is not optional: the outer seal hashes the bundle contents, so
+signing an inner framework afterwards would invalidate it — the same mistake this
+whole effort exists to stop making. Verification was extended to match, and now
+fails if any slice framework is unsigned, ad-hoc, missing a secure timestamp, or
+carries the wrong team.
+
+`--deep` is still not used. It re-signs nested code with the outer bundle's
+options and Apple documents it as inappropriate for producing a distributable
+signature; signing each slice explicitly gives the same coverage correctly.
+
+Compiled binaries are unchanged from 1.7.0 — only the signing of the published
+artifact changed. Consumer caches are version-keyed, hence a new version rather
+than a re-release.
+
 ## 1.7.0
 
 ### Apple: the published xcframework is provider-signed
