@@ -333,15 +333,52 @@ static int sp_apply_inittab(void) {
     return 0;
 }
 
-// Insert module_paths into sys.path AFTER Py_Initialize. Uses
-// PyRun_SimpleString because PyConfig.module_search_paths isn't in the
-// Limited API as of Python 3.12.
+// Python source appended after the generated `_sp_paths = [...]` list literal
+// in sp_apply_module_paths. Three jobs:
+//
+// 1. Dedupe. The platform plugins pass the same list both as PYTHONPATH
+//    (env, consumed by Py_Initialize) and as module_paths, so each entry
+//    would otherwise appear on sys.path twice. Drop any existing occurrence
+//    (compared case-/separator-insensitively — on Windows PYTHONPATH entries
+//    can come back with different casing) and re-insert the list at the front,
+//    preserving the caller's highest-to-lowest precedence order.
+//
+// 2. Treat every module path as a *site directory*. CPython only processes
+//    `.pth` files for site dirs (PYTHONHOME's own Lib/site-packages) — never
+//    for PYTHONPATH entries — so packages that rely on a `.pth` to extend
+//    sys.path or run bootstrap code were broken in the bundled site-packages.
+//    pywin32 is the canonical case: `pywin32.pth` adds `win32`, `win32\lib`
+//    and `pythonwin` to sys.path and imports `pywin32_bootstrap`, which
+//    registers `pywin32_system32` as a DLL directory; without it
+//    `import win32com` fails with "No module named 'pywintypes'"
+//    (flet-dev/flet#5071). `site.addsitedir` appends `.pth` path lines after
+//    the existing entries, exactly as a normal installation would, and skips
+//    paths that are not directories (Android zips, missing `__pypackages__`).
+//
+// 3. Clean up the temporaries from `__main__`'s globals, which this code runs
+//    in (see sp_pyrun_string).
+static const char* SP_MODULE_PATHS_EPILOGUE =
+    "\n"
+    "import os, site\n"
+    "_sp_norm = {os.path.normcase(os.path.abspath(_p)) for _p in _sp_paths}\n"
+    "sys.path[:] = [_p for _p in sys.path\n"
+    "               if os.path.normcase(os.path.abspath(_p)) not in _sp_norm]\n"
+    "sys.path[:0] = _sp_paths\n"
+    "for _p in _sp_paths:\n"
+    "    if os.path.isdir(_p):\n"
+    "        site.addsitedir(_p)\n"
+    "del _sp_paths, _sp_norm, _p, os, site\n";
+
+// Insert module_paths into sys.path after Py_Initialize and register them as
+// site directories (see SP_MODULE_PATHS_EPILOGUE). Uses sp_pyrun_string
+// because PyConfig.module_search_paths isn't in the Limited API as of
+// Python 3.12.
 static int sp_apply_module_paths(sp_state_t* st) {
     if (st->module_paths_count == 0) return 0;
 
-    // Build "sys.path[:0] = [...]" — insert all entries at the front in order.
+    // Build "_sp_paths = [...]" followed by the epilogue.
     // Conservative buffer estimate: per-entry ~3x worst-case escaping.
-    size_t total = 64;
+    size_t total = 64 + strlen(SP_MODULE_PATHS_EPILOGUE);
     for (size_t i = 0; i < st->module_paths_count; i++) {
         total += strlen(st->module_paths[i]) * 3 + 8;
     }
@@ -349,7 +386,7 @@ static int sp_apply_module_paths(sp_state_t* st) {
     if (!code) return -1;
 
     char* p = code;
-    int n = snprintf(p, total, "import sys\nsys.path[:0] = [");
+    int n = snprintf(p, total, "import sys\n_sp_paths = [");
     p += n;
 
     for (size_t i = 0; i < st->module_paths_count; i++) {
@@ -373,6 +410,7 @@ static int sp_apply_module_paths(sp_state_t* st) {
     }
     *p++ = ']';
     *p   = '\0';
+    snprintf(p, total - (size_t)(p - code), "%s", SP_MODULE_PATHS_EPILOGUE);
 
     int rc = sp_pyrun_string(code, "<sp_module_paths>");
     free(code);
