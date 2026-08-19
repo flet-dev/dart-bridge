@@ -333,30 +333,13 @@ static int sp_apply_inittab(void) {
     return 0;
 }
 
-// Python source appended after the generated `_sp_paths = [...]` list literal
-// in sp_apply_module_paths. Three jobs:
-//
-// 1. Dedupe. The platform plugins pass the same list both as PYTHONPATH
-//    (env, consumed by Py_Initialize) and as module_paths, so each entry
-//    would otherwise appear on sys.path twice. Drop any existing occurrence
-//    (compared case-/separator-insensitively — on Windows PYTHONPATH entries
-//    can come back with different casing) and re-insert the list at the front,
-//    preserving the caller's highest-to-lowest precedence order.
-//
-// 2. Treat every module path as a *site directory*. CPython only processes
-//    `.pth` files for site dirs (PYTHONHOME's own Lib/site-packages) — never
-//    for PYTHONPATH entries — so packages that rely on a `.pth` to extend
-//    sys.path or run bootstrap code were broken in the bundled site-packages.
-//    pywin32 is the canonical case: `pywin32.pth` adds `win32`, `win32\lib`
-//    and `pythonwin` to sys.path and imports `pywin32_bootstrap`, which
-//    registers `pywin32_system32` as a DLL directory; without it
-//    `import win32com` fails with "No module named 'pywintypes'"
-//    (flet-dev/flet#5071). `site.addsitedir` appends `.pth` path lines after
-//    the existing entries, exactly as a normal installation would, and skips
-//    paths that are not directories (Android zips, missing `__pypackages__`).
-//
-// 3. Clean up the temporaries from `__main__`'s globals, which this code runs
-//    in (see sp_pyrun_string).
+// Python source appended to the generated `_sp_paths = [...]` literal.
+// Plugins also pass these paths through PYTHONPATH, so drop the existing
+// occurrences before re-inserting the list at the front in the configured order.
+// Register each directory with site.addsitedir() so its `.pth` files are processed
+// — CPython never does this for PYTHONPATH entries; non-directories (such
+// as Android zips) stay on sys.path unchanged. Runs in __main__'s globals,
+// which the user's program shares — hence the final `del`.
 static const char* SP_MODULE_PATHS_EPILOGUE =
     "\n"
     "import os, site\n"
@@ -369,10 +352,10 @@ static const char* SP_MODULE_PATHS_EPILOGUE =
     "        site.addsitedir(_p)\n"
     "del _sp_paths, _sp_norm, _p, os, site\n";
 
-// Insert module_paths into sys.path after Py_Initialize and register them as
-// site directories (see SP_MODULE_PATHS_EPILOGUE). Uses sp_pyrun_string
-// because PyConfig.module_search_paths isn't in the Limited API as of
-// Python 3.12.
+// Put module_paths on sys.path and register them as site directories, by
+// generating the `_sp_paths = [...]` literal and evaluating it together with
+// SP_MODULE_PATHS_EPILOGUE. Done as Python source after Py_Initialize because
+// the Limited API has no PyConfig.module_search_paths (as of Python 3.12).
 static int sp_apply_module_paths(sp_state_t* st) {
     if (st->module_paths_count == 0) return 0;
 

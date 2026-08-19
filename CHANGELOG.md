@@ -2,34 +2,14 @@
 
 ## 1.8.0
 
-### Module paths are site directories: `.pth` files now work in bundled site-packages
+### Process `.pth` files in bundled site-packages
 
-CPython only processes `.pth` files for *site directories* — the
-`Lib/site-packages` under `PYTHONHOME` — and never for `PYTHONPATH` entries.
-Every `serious_python_*` plugin exposes the app's bundled `site-packages` to the
-interpreter through `PYTHONPATH` / `module_paths`, so any package that relies
-on a `.pth` file to extend `sys.path` or run bootstrap code silently broke in
-a packaged app.
-
-pywin32 is the canonical case ([flet-dev/flet#5071](https://github.com/flet-dev/flet/issues/5071)):
-`pywin32.pth` adds `win32`, `win32\lib` and `pythonwin` to `sys.path` and
-imports `pywin32_bootstrap`, which registers `pywin32_system32` as a DLL
-directory. Without it, `import win32com` in a `flet build windows` app failed
-with `ModuleNotFoundError: No module named 'pywintypes'`.
-
-`serious_python_run` now registers every `module_paths` entry with
-`site.addsitedir()` after inserting it into `sys.path`. `.pth` path lines are
-appended after the existing entries, exactly as in a regular installation;
-entries that are not directories (Android zips, an absent `__pypackages__`)
-are skipped.
-
-### `sys.path` no longer contains every module path twice
-
-The plugins pass the same list both as `PYTHONPATH` (consumed by
-`Py_Initialize`) and as `module_paths` (inserted post-init), so every entry
-showed up on `sys.path` twice. Existing occurrences are now removed — compared
-case- and separator-insensitively — before the list is re-inserted at the
-front, preserving the caller's precedence order.
+Register module paths as site directories so CPython processes their `.pth`
+files. This fixes packages such as pywin32, whose `.pth` file configures its
+module and DLL paths ([flet-dev/flet#5071](https://github.com/flet-dev/flet/issues/5071)).
+Duplicate `sys.path` entries created by supplying the paths through both
+`PYTHONPATH` and `module_paths` are also removed without changing their
+precedence.
 
 ## 1.7.1
 
