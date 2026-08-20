@@ -409,14 +409,24 @@ static int sp_apply_module_paths(sp_state_t* st) {
     return 0;
 }
 
-// Set sys.argv[0] to program_name (default "python").
+// Set sys.argv to [program_name] (default "python").
 static int sp_apply_program_name(sp_state_t* st) {
     const char* name = st->program_name ? st->program_name : "python";
-    char buf[1024];
-    // Naive escape: rely on caller not providing wild characters; program
-    // name is typically a bundle identifier or "python".
-    snprintf(buf, sizeof(buf), "import sys; sys.argv = [r'''%s''']", name);
-    return sp_pyrun_string(buf, "<sp_program_name>") == 0 ? 0 : -1;
+    PyObject* argv = PyList_New(1);
+    if (!argv) {
+        PyErr_Print();
+        return -1;
+    }
+    PyObject* item = PyUnicode_FromString(name);
+    // PyList_SetItem steals `item`, releasing it even when it fails.
+    if (!item || PyList_SetItem(argv, 0, item) != 0
+        || PySys_SetObject("argv", argv) != 0) {
+        Py_DECREF(argv);
+        PyErr_Print();
+        return -1;
+    }
+    Py_DECREF(argv);  // sys's dict holds its own reference now
+    return 0;
 }
 
 // Run the configured target. Returns exit code (0 = OK).
