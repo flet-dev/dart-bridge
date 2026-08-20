@@ -359,11 +359,11 @@ static const char* SP_MODULE_PATHS_EPILOGUE =
 static int sp_apply_module_paths(sp_state_t* st) {
     if (st->module_paths_count == 0) return 0;
 
-    // Build "_sp_paths = [...]" followed by the epilogue.
-    // Conservative buffer estimate: per-entry ~3x worst-case escaping.
+    // Conservative buffer estimate: escaping can emit up to 8 output bytes
+    // per input byte, plus per-entry quoting/separator overhead.
     size_t total = 64 + strlen(SP_MODULE_PATHS_EPILOGUE);
     for (size_t i = 0; i < st->module_paths_count; i++) {
-        total += strlen(st->module_paths[i]) * 3 + 8;
+        total += strlen(st->module_paths[i]) * 8 + 8;
     }
     char* code = (char*)malloc(total);
     if (!code) return -1;
@@ -373,13 +373,12 @@ static int sp_apply_module_paths(sp_state_t* st) {
     p += n;
 
     for (size_t i = 0; i < st->module_paths_count; i++) {
-        // Quote with repr-safe escaping: replace backslash and apostrophe.
-        // Simpler approach: use Python triple-quoted raw string? No — use
-        // explicit escaping.
+        // Quote with raw-string fragments, splitting around apostrophes.
         n = snprintf(p, total - (p - code), "%sr'", i == 0 ? "" : ", ");
         p += n;
         const char* src = st->module_paths[i];
-        for (; *src && (size_t)(p - code) < total - 4; src++) {
+        // Defensive bound only — unreachable with the 8x sizing above.
+        for (; *src && (size_t)(p - code) < total - 12; src++) {
             if (*src == '\'') {
                 // r-strings can't contain unescaped quotes that match;
                 // fall back to concatenation.
