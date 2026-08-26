@@ -221,18 +221,26 @@ jobs:
         # armeabi-v7a for every supported minor, so all ABIs build for all
         # versions.
         abi: [arm64-v8a, armeabi-v7a, x86_64]
-        python_version: ['3.12', '3.13', '3.14']
+        python_version: ['3.12', '3.13', '3.14', '3.15']
     env:
       # python-build release the Android Python headers/libpython come from.
       # Keep in sync with serious_python's `pythonReleaseDate` — both link
       # these binaries against the same date-keyed CPython artifacts.
-      PYTHON_BUILD_RELEASE_DATE: '20260629'
+      PYTHON_BUILD_RELEASE_DATE: '20260730'
+      # Fallback for minors the pinned release doesn't carry yet (e.g. a
+      # prerelease line still living on a python-build branch): fetch that
+      # minor's artifacts from this flet-dev/python-build Actions run instead —
+      # the same PYTHON_BUILD_RUN_ID pattern mobile-forge's CI uses to consume
+      # unreleased python-build output. Clear it once the release has the minor.
+      PYTHON_BUILD_RUN_ID: '32997272927'
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           persist-credentials: false
 
       - name: Download Python headers + libpython (python-android-mobile-forge)
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           VER=${{ matrix.python_version }}
@@ -243,9 +251,33 @@ jobs:
           # mobile-forge artifact — which carries armeabi-v7a for every minor.
           curl -fL -o manifest.json \
             "https://github.com/flet-dev/python-build/releases/download/${DATE}/manifest.json"
-          FULLVER=$(python3 -c "import json;print(json.load(open('manifest.json'))['pythons']['${VER}']['full_version'])")
-          curl -fL -o pamf.tar.gz \
-            "https://github.com/flet-dev/python-build/releases/download/${DATE}/python-android-mobile-forge-${FULLVER}.tar.gz"
+          FULLVER=$(python3 -c "import json;print(json.load(open('manifest.json'))['pythons'].get('${VER}',{}).get('full_version',''))")
+          if [ -n "$FULLVER" ]; then
+            curl -fL -o pamf.tar.gz \
+              "https://github.com/flet-dev/python-build/releases/download/${DATE}/python-android-mobile-forge-${FULLVER}.tar.gz"
+          else
+            # Minor not in the pinned release — fetch it from the pinned
+            # python-build Actions run's artifacts (unreleased prerelease line).
+            if [ -z "${PYTHON_BUILD_RUN_ID:-}" ]; then
+              echo "Python ${VER} is not in release ${DATE} and PYTHON_BUILD_RUN_ID is unset" >&2
+              exit 1
+            fi
+            ART=$(gh api "repos/flet-dev/python-build/actions/runs/${PYTHON_BUILD_RUN_ID}/artifacts" \
+              --jq '.artifacts[].name' | grep -E "^python-android-${VER//./\\.}\." | head -n1)
+            if [ -z "$ART" ]; then
+              echo "No python-android-${VER}.* artifact on python-build run ${PYTHON_BUILD_RUN_ID}" >&2
+              exit 1
+            fi
+            FULLVER=${ART#python-android-}
+            echo "Fetching python-android-mobile-forge-${FULLVER}.tar.gz from python-build run ${PYTHON_BUILD_RUN_ID} (artifact: ${ART})"
+            stage=$(mktemp -d)
+            gh run download "$PYTHON_BUILD_RUN_ID" \
+              --repo flet-dev/python-build \
+              --name "$ART" \
+              --dir "$stage"
+            mv "$stage/python-android-mobile-forge-${FULLVER}.tar.gz" pamf.tar.gz
+            rm -rf "$stage"
+          fi
           mkdir -p pydist
           # libpython3.so is the GNU linker script `INPUT(-lpython3.X)`;
           # extracting both lets ld follow the script to libpython3.X.so on
@@ -496,11 +528,14 @@ jobs:
             dist/libdart_bridge-android-arm64-v8a-py3.12.so
             dist/libdart_bridge-android-arm64-v8a-py3.13.so
             dist/libdart_bridge-android-arm64-v8a-py3.14.so
+            dist/libdart_bridge-android-arm64-v8a-py3.15.so
             dist/libdart_bridge-android-armeabi-v7a-py3.12.so
             dist/libdart_bridge-android-armeabi-v7a-py3.13.so
             dist/libdart_bridge-android-armeabi-v7a-py3.14.so
+            dist/libdart_bridge-android-armeabi-v7a-py3.15.so
             dist/libdart_bridge-android-x86_64-py3.12.so
             dist/libdart_bridge-android-x86_64-py3.13.so
             dist/libdart_bridge-android-x86_64-py3.14.so
+            dist/libdart_bridge-android-x86_64-py3.15.so
             dist/dart_bridge-apple.xcframework.zip
           fail_on_unmatched_files: true

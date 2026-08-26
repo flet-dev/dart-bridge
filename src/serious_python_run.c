@@ -525,21 +525,17 @@ static int sp_run_python(sp_state_t* st) {
 #if defined(_WIN32)
     // Force Python UTF-8 Mode before Py_Initialize so the embedded interpreter
     // uses UTF-8 for default text encoding on Windows locales whose ANSI code
-    // page is not UTF-8. PyPreConfig would be the modern API, but this path is
-    // built with Py_LIMITED_API, where PyPreConfig is unavailable.
-#if defined(_MSC_VER)
-#  pragma warning(push)
-#  pragma warning(disable : 4996)
-#elif defined(__GNUC__) || defined(__clang__)
-#  pragma GCC diagnostic push
-#  pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-#endif
-    Py_UTF8Mode = 1;
-#if defined(_MSC_VER)
-#  pragma warning(pop)
-#elif defined(__GNUC__) || defined(__clang__)
-#  pragma GCC diagnostic pop
-#endif
+    // page is not UTF-8. Done via the PYTHONUTF8 env var (honoured during
+    // Py_Initialize) instead of the legacy Py_UTF8Mode global: the global is
+    // deprecated-for-removal and this one abi3 DLL must keep LOADING against
+    // future CPython stable ABIs. Semantics are unchanged — CPython gives an
+    // already-set PYTHONUTF8 precedence over the global, which the guard
+    // mirrors — and on 3.15+ UTF-8 mode is the default anyway (PEP 686), so
+    // this becomes a harmless no-op there. Same pattern as the multiprocessing
+    // child-process exports later in this file.
+    if (!sp_getenv_present("PYTHONUTF8")) {
+        sp_setenv("PYTHONUTF8", "1");
+    }
 #endif
 
     Py_Initialize();
