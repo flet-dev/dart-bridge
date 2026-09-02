@@ -11,6 +11,15 @@ Duplicate `sys.path` entries created by supplying the paths through both
 `PYTHONPATH` and `module_paths` are also removed without changing their
 precedence.
 
+### Handle special characters in module paths and program names
+
+Pass module paths and program names to CPython as objects instead of inserting
+them into generated source. A module path ending in a backslash or containing
+a newline, or a program name containing `'''` or longer than 1024 bytes,
+previously broke app startup with a `SyntaxError`; all now work correctly, and
+nothing needs escaping anymore. The module-path bootstrap also keeps its
+temporary variables separate from the user program's namespace.
+
 ## 1.7.1
 
 ### Apple: sign the inner frameworks too, not just the outer xcframework

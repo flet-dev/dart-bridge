@@ -8,8 +8,8 @@
 // Limited API (Py_LIMITED_API=0x030c0000) — uses only symbols in the abi3
 // stable ABI for Python 3.12+. One binary per (platform × arch) works
 // across every 3.12+ runtime. No PyConfig (not in Limited API); we use
-// env vars (setenv) pre-Py_Initialize and PyRun_SimpleString post-init
-// for sys.path / sys.argv adjustments.
+// env vars (setenv) pre-Py_Initialize, and C API calls plus a bootstrap
+// script post-init, for sys.path / sys.argv adjustments.
 
 #define PY_SSIZE_T_CLEAN
 // Android uses the FULL CPython API (not abi3): it needs PyConfig to start the
@@ -29,24 +29,15 @@
 
 // PyRun_SimpleString and PyRun_SimpleFile aren't in the Limited API — the
 // abi3 stub library (python3.lib on Windows) doesn't export them. We
-// reimplement them using Py_CompileString + PyEval_EvalCode against
-// __main__'s globals, which ARE in the Limited API (since 3.2). Behavior
-// matches CPython's own PyRun_SimpleStringFlags / PyRun_SimpleFileExFlags
-// (see Python/pythonrun.c).
-static int sp_pyrun_string(const char *source, const char *filename) {
+// reimplement them using Py_CompileString + PyEval_EvalCode, which ARE in
+// the Limited API (since 3.2). Behavior matches CPython's own
+// PyRun_SimpleStringFlags / PyRun_SimpleFileExFlags (see Python/pythonrun.c).
+static int sp_pyrun_string_in_globals(const char *source, const char *filename, PyObject *globals) {
     PyObject *code = Py_CompileString(source, filename, Py_file_input);
     if (!code) {
         PyErr_Print();
         return -1;
     }
-
-    PyObject *main_mod = PyImport_AddModule("__main__");  // borrowed
-    if (!main_mod) {
-        Py_DECREF(code);
-        PyErr_Print();
-        return -1;
-    }
-    PyObject *globals = PyModule_GetDict(main_mod);  // borrowed
 
     PyObject *result = PyEval_EvalCode(code, globals, globals);
     Py_DECREF(code);
@@ -56,6 +47,21 @@ static int sp_pyrun_string(const char *source, const char *filename) {
     }
     Py_DECREF(result);
     return 0;
+}
+
+// Run source in __main__'s globals (PyRun_SimpleString semantics).
+static int sp_pyrun_string(const char *source, const char *filename) {
+    PyObject *main_mod = PyImport_AddModule("__main__");  // borrowed
+    if (!main_mod) {
+        PyErr_Print();
+        return -1;
+    }
+    PyObject *globals = PyModule_GetDict(main_mod);  // borrowed
+    if (!globals) {
+        PyErr_Print();
+        return -1;
+    }
+    return sp_pyrun_string_in_globals(source, filename, globals);
 }
 
 static int sp_pyrun_file(FILE *fp, const char *filename) {
@@ -333,84 +339,94 @@ static int sp_apply_inittab(void) {
     return 0;
 }
 
-// Python source appended to the generated `_sp_paths = [...]` literal.
-// Plugins also pass these paths through PYTHONPATH, so drop the existing
-// occurrences before re-inserting the list at the front in the configured order.
-// Register each directory with site.addsitedir() so its `.pth` files are processed
-// — CPython never does this for PYTHONPATH entries; non-directories (such
-// as Android zips) stay on sys.path unchanged. Runs in __main__'s globals,
-// which the user's program shares — hence the final `del`.
-static const char* SP_MODULE_PATHS_EPILOGUE =
-    "\n"
-    "import os, site\n"
+// Python program run by sp_apply_module_paths with private globals holding
+// `_sp_paths` (the module-path list), so its imports and temporaries cannot
+// leak into the user's __main__. The plugins also pass these paths through
+// PYTHONPATH, so drop the existing occurrences before re-inserting the list
+// at the front in the configured order. Register each directory with
+// site.addsitedir() so its `.pth` files are processed — CPython never does
+// this for PYTHONPATH entries; non-directories (such as Android zips) stay
+// on sys.path unchanged.
+static const char* SP_MODULE_PATHS_SCRIPT =
+    "import sys, os, site\n"
     "_sp_norm = {os.path.normcase(os.path.abspath(_p)) for _p in _sp_paths}\n"
     "sys.path[:] = [_p for _p in sys.path\n"
     "               if os.path.normcase(os.path.abspath(_p)) not in _sp_norm]\n"
     "sys.path[:0] = _sp_paths\n"
     "for _p in _sp_paths:\n"
     "    if os.path.isdir(_p):\n"
-    "        site.addsitedir(_p)\n"
-    "del _sp_paths, _sp_norm, _p, os, site\n";
+    "        site.addsitedir(_p)\n";
 
-// Put module_paths on sys.path and register them as site directories, by
-// generating the `_sp_paths = [...]` literal and evaluating it together with
-// SP_MODULE_PATHS_EPILOGUE. Done as Python source after Py_Initialize because
-// the Limited API has no PyConfig.module_search_paths (as of Python 3.12).
+// Shared failure tail for sp_apply_module_paths: release the temporaries,
+// surface the pending Python error, and flag the failure on stderr.
+static int sp_paths_failed(PyObject* list, PyObject* globals) {
+    Py_XDECREF(list);
+    Py_XDECREF(globals);
+    if (PyErr_Occurred()) PyErr_Print();
+    fprintf(stderr, "[serious_python_run] sys.path injection failed\n");
+    return -1;
+}
+
+// Put module_paths on sys.path and register them as site directories: build
+// the list with the C API, expose it as `_sp_paths` in a private globals
+// dict, and run SP_MODULE_PATHS_SCRIPT there. The paths travel as objects,
+// never as quoted source text, so nothing needs escaping.
+// Done after Py_Initialize because PyConfig.module_search_paths is unavailable
+// under the Python 3.12 Limited API targeted by this library.
 static int sp_apply_module_paths(sp_state_t* st) {
     if (st->module_paths_count == 0) return 0;
 
-    // Conservative buffer estimate: escaping can emit up to 8 output bytes
-    // per input byte, plus per-entry quoting/separator overhead.
-    size_t total = 64 + strlen(SP_MODULE_PATHS_EPILOGUE);
+    PyObject* list = PyList_New((Py_ssize_t)st->module_paths_count);
+    if (!list) return sp_paths_failed(NULL, NULL);
     for (size_t i = 0; i < st->module_paths_count; i++) {
-        total += strlen(st->module_paths[i]) * 8 + 8;
-    }
-    char* code = (char*)malloc(total);
-    if (!code) return -1;
-
-    char* p = code;
-    int n = snprintf(p, total, "import sys\n_sp_paths = [");
-    p += n;
-
-    for (size_t i = 0; i < st->module_paths_count; i++) {
-        // Quote with raw-string fragments, splitting around apostrophes.
-        n = snprintf(p, total - (p - code), "%sr'", i == 0 ? "" : ", ");
-        p += n;
-        const char* src = st->module_paths[i];
-        // Defensive bound only — unreachable with the 8x sizing above.
-        for (; *src && (size_t)(p - code) < total - 12; src++) {
-            if (*src == '\'') {
-                // r-strings can't contain unescaped quotes that match;
-                // fall back to concatenation.
-                *p++ = '\''; *p++ = ' '; *p++ = '"'; *p++ = '\''; *p++ = '"';
-                *p++ = ' '; *p++ = 'r'; *p++ = '\'';
-            } else {
-                *p++ = *src;
-            }
+        PyObject* item = PyUnicode_FromString(st->module_paths[i]);
+        // PyList_SetItem steals `item`, releasing it even when it fails.
+        if (!item || PyList_SetItem(list, (Py_ssize_t)i, item) != 0) {
+            return sp_paths_failed(list, NULL);
         }
-        *p++ = '\'';
     }
-    *p++ = ']';
-    *p   = '\0';
-    snprintf(p, total - (size_t)(p - code), "%s", SP_MODULE_PATHS_EPILOGUE);
 
-    int rc = sp_pyrun_string(code, "<sp_module_paths>");
-    free(code);
-    if (rc != 0) {
-        fprintf(stderr, "[serious_python_run] sys.path injection failed\n");
-        return -1;
+    PyObject* globals = PyDict_New();
+    if (!globals) return sp_paths_failed(list, NULL);
+
+    // PyEval_GetBuiltins is the only builtins accessor in the 3.12 Limited
+    // API (PyEval_GetFrameBuiltins is 3.13+); with no frame executing it
+    // returns the interpreter's builtins.
+    PyObject* builtins = PyEval_GetBuiltins();  // borrowed
+    if (!builtins) {
+        PyErr_SetString(PyExc_RuntimeError, "builtins are not available");
+        return sp_paths_failed(list, globals);
     }
+    if (PyDict_SetItemString(globals, "__builtins__", builtins) != 0
+        || PyDict_SetItemString(globals, "_sp_paths", list) != 0) {
+        return sp_paths_failed(list, globals);
+    }
+    Py_DECREF(list);  // the globals dict holds its own reference now
+
+    int rc = sp_pyrun_string_in_globals(SP_MODULE_PATHS_SCRIPT, "<sp_module_paths>", globals);
+    Py_DECREF(globals);
+    if (rc != 0) return sp_paths_failed(NULL, NULL);
     return 0;
 }
 
-// Set sys.argv[0] to program_name (default "python").
+// Set sys.argv to [program_name] (default "python").
 static int sp_apply_program_name(sp_state_t* st) {
     const char* name = st->program_name ? st->program_name : "python";
-    char buf[1024];
-    // Naive escape: rely on caller not providing wild characters; program
-    // name is typically a bundle identifier or "python".
-    snprintf(buf, sizeof(buf), "import sys; sys.argv = [r'''%s''']", name);
-    return sp_pyrun_string(buf, "<sp_program_name>") == 0 ? 0 : -1;
+    PyObject* argv = PyList_New(1);
+    if (!argv) {
+        PyErr_Print();
+        return -1;
+    }
+    PyObject* item = PyUnicode_FromString(name);
+    // PyList_SetItem steals `item`, releasing it even when it fails.
+    if (!item || PyList_SetItem(argv, 0, item) != 0
+        || PySys_SetObject("argv", argv) != 0) {
+        Py_DECREF(argv);
+        PyErr_Print();
+        return -1;
+    }
+    Py_DECREF(argv);  // sys's dict holds its own reference now
+    return 0;
 }
 
 // Run the configured target. Returns exit code (0 = OK).
