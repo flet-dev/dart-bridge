@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.8.0
+
+### Process `.pth` files in bundled site-packages
+
+Register module paths as site directories so CPython processes their `.pth`
+files. This fixes packages such as pywin32, whose `.pth` file configures its
+module and DLL paths ([flet-dev/flet#5071](https://github.com/flet-dev/flet/issues/5071)).
+Duplicate `sys.path` entries created by supplying the paths through both
+`PYTHONPATH` and `module_paths` are also removed without changing their
+precedence.
+
 ## 1.7.1
 
 ### Apple: sign the inner frameworks too, not just the outer xcframework

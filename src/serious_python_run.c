@@ -333,33 +333,52 @@ static int sp_apply_inittab(void) {
     return 0;
 }
 
-// Insert module_paths into sys.path AFTER Py_Initialize. Uses
-// PyRun_SimpleString because PyConfig.module_search_paths isn't in the
-// Limited API as of Python 3.12.
+// Python source appended to the generated `_sp_paths = [...]` literal.
+// Plugins also pass these paths through PYTHONPATH, so drop the existing
+// occurrences before re-inserting the list at the front in the configured order.
+// Register each directory with site.addsitedir() so its `.pth` files are processed
+// — CPython never does this for PYTHONPATH entries; non-directories (such
+// as Android zips) stay on sys.path unchanged. Runs in __main__'s globals,
+// which the user's program shares — hence the final `del`.
+static const char* SP_MODULE_PATHS_EPILOGUE =
+    "\n"
+    "import os, site\n"
+    "_sp_norm = {os.path.normcase(os.path.abspath(_p)) for _p in _sp_paths}\n"
+    "sys.path[:] = [_p for _p in sys.path\n"
+    "               if os.path.normcase(os.path.abspath(_p)) not in _sp_norm]\n"
+    "sys.path[:0] = _sp_paths\n"
+    "for _p in _sp_paths:\n"
+    "    if os.path.isdir(_p):\n"
+    "        site.addsitedir(_p)\n"
+    "del _sp_paths, _sp_norm, _p, os, site\n";
+
+// Put module_paths on sys.path and register them as site directories, by
+// generating the `_sp_paths = [...]` literal and evaluating it together with
+// SP_MODULE_PATHS_EPILOGUE. Done as Python source after Py_Initialize because
+// the Limited API has no PyConfig.module_search_paths (as of Python 3.12).
 static int sp_apply_module_paths(sp_state_t* st) {
     if (st->module_paths_count == 0) return 0;
 
-    // Build "sys.path[:0] = [...]" — insert all entries at the front in order.
-    // Conservative buffer estimate: per-entry ~3x worst-case escaping.
-    size_t total = 64;
+    // Conservative buffer estimate: escaping can emit up to 8 output bytes
+    // per input byte, plus per-entry quoting/separator overhead.
+    size_t total = 64 + strlen(SP_MODULE_PATHS_EPILOGUE);
     for (size_t i = 0; i < st->module_paths_count; i++) {
-        total += strlen(st->module_paths[i]) * 3 + 8;
+        total += strlen(st->module_paths[i]) * 8 + 8;
     }
     char* code = (char*)malloc(total);
     if (!code) return -1;
 
     char* p = code;
-    int n = snprintf(p, total, "import sys\nsys.path[:0] = [");
+    int n = snprintf(p, total, "import sys\n_sp_paths = [");
     p += n;
 
     for (size_t i = 0; i < st->module_paths_count; i++) {
-        // Quote with repr-safe escaping: replace backslash and apostrophe.
-        // Simpler approach: use Python triple-quoted raw string? No — use
-        // explicit escaping.
+        // Quote with raw-string fragments, splitting around apostrophes.
         n = snprintf(p, total - (p - code), "%sr'", i == 0 ? "" : ", ");
         p += n;
         const char* src = st->module_paths[i];
-        for (; *src && (size_t)(p - code) < total - 4; src++) {
+        // Defensive bound only — unreachable with the 8x sizing above.
+        for (; *src && (size_t)(p - code) < total - 12; src++) {
             if (*src == '\'') {
                 // r-strings can't contain unescaped quotes that match;
                 // fall back to concatenation.
@@ -373,6 +392,7 @@ static int sp_apply_module_paths(sp_state_t* st) {
     }
     *p++ = ']';
     *p   = '\0';
+    snprintf(p, total - (size_t)(p - code), "%s", SP_MODULE_PATHS_EPILOGUE);
 
     int rc = sp_pyrun_string(code, "<sp_module_paths>");
     free(code);
