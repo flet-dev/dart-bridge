@@ -194,6 +194,7 @@ EXPORT int  serious_python_register_extension(const char* name, sp_pyinit_func_t
 EXPORT int  serious_python_run(const sp_run_config_t* cfg);
 EXPORT int  serious_python_request_stop(void);
 EXPORT void serious_python_finalize(void);
+EXPORT void serious_python_hard_exit(int exit_code);
 EXPORT int  serious_python_is_mp_invocation(int argc, char** argv);
 EXPORT int  serious_python_main(int argc, char** argv);
 #if defined(_WIN32)
@@ -691,6 +692,31 @@ EXPORT void serious_python_finalize(void) {
         dart_bridge_clear_handlers();
         Py_Finalize();
     }
+}
+
+// Terminate the process WITHOUT running atexit handlers or C++ static
+// destructors. Does not return.
+//
+// The interpreter runs on a detached thread (see sp_worker) that may still be
+// executing native extension code when the host decides to quit. A normal
+// exit() runs __cxa_finalize, destroying the C++ statics inside every loaded
+// extension module out from under that thread (pybind11 type-caster maps,
+// numpy's internals), which faults on whichever one it touches next. The host
+// is exiting anyway, so there is nothing left to clean up that the kernel will
+// not reclaim; skipping teardown removes the window entirely.
+//
+// Callers: the native app runners on desktop window close, and the Dart side
+// when the Python program requests an exit (dart:io's exit() would run the
+// same teardown).
+EXPORT void serious_python_hard_exit(int exit_code) {
+#if defined(_WIN32)
+    // _exit()/ExitProcess still run DLL_PROCESS_DETACH, where the CRT's
+    // DllMain runs each DLL's static destructors, the very thing being
+    // avoided. TerminateProcess is the only primitive that skips it.
+    TerminateProcess(GetCurrentProcess(), (UINT)exit_code);
+#else
+    _exit(exit_code);
+#endif
 }
 
 // ---------------------------------------------------------------------------
