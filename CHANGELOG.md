@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.9.0
+
+### New export: `serious_python_hard_exit(int exit_code)`
+
+Terminates the process without running `atexit` handlers or C++ static destructors, and
+does not return.
+
+The interpreter runs on a detached thread (`sp_worker`) that may still be executing native
+extension code when the host decides to quit. A normal `exit()` runs `__cxa_finalize`,
+destroying the C++ statics inside every loaded extension module out from under that thread
+(pybind11 type-caster maps, numpy internals), which faults on whichever one it touches
+next. Embedders saw this as a `SIGSEGV` on exit from an app that had otherwise finished
+its work.
+
+On POSIX this is `_exit()`. On Windows it is `TerminateProcess`, because `_exit()` and
+`ExitProcess` both still run `DLL_PROCESS_DETACH`, where the CRT's `DllMain` runs each
+DLL's static destructors, the very thing being avoided.
+
+Intended for embedders at process exit: a native app runner handling window close, or the
+Dart side when the Python program requests an exit.
+
 ## 1.8.0
 
 ### Process `.pth` files in bundled site-packages
