@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### macOS: give the embedded Python worker an 8 MiB stack
+
+The asynchronous worker now uses pthread attributes to request at least 8 MiB
+on macOS. The default secondary-thread stack could be exhausted while loading
+native scientific packages such as NumPy. Other platforms and synchronous runs
+are unchanged.
+
 ## 1.9.0
 
 ### New export: `serious_python_hard_exit(int exit_code)`
