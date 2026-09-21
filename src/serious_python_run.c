@@ -136,6 +136,9 @@ static int sp_getenv_present(const char* k) {
 #else
 #include <pthread.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 // `used` is mainly for Darwin/Mach-O: dart_bridge is statically linked into
 // the host app, and some public entry points are discovered later via dlsym
 // / Dart FFI. Mark exported functions as used so the host linker's dead-strip
@@ -667,7 +670,30 @@ EXPORT int serious_python_run(const sp_run_config_t* cfg) {
     CloseHandle((HANDLE)h);
 #else
     pthread_t thread;
-    if (pthread_create(&thread, NULL, sp_worker, st) != 0) {
+#if defined(__APPLE__) && TARGET_OS_OSX
+    // The default macOS secondary-thread stack is too small for some Python
+    // native extensions (notably NumPy/OpenBLAS). Keep larger OS defaults.
+    pthread_attr_t attr;
+    if (pthread_attr_init(&attr) != 0) {
+        sp_state_free(st);
+        return -1;
+    }
+    size_t stack_size;
+    int attr_rc = pthread_attr_getstacksize(&attr, &stack_size);
+    if (attr_rc == 0 && stack_size < 8 * 1024 * 1024) {
+        attr_rc = pthread_attr_setstacksize(&attr, 8 * 1024 * 1024);
+    }
+    if (attr_rc != 0) {
+        pthread_attr_destroy(&attr);
+        sp_state_free(st);
+        return -1;
+    }
+    int create_rc = pthread_create(&thread, &attr, sp_worker, st);
+    pthread_attr_destroy(&attr);
+#else
+    int create_rc = pthread_create(&thread, NULL, sp_worker, st);
+#endif
+    if (create_rc != 0) {
         sp_state_free(st);
         return -1;
     }
