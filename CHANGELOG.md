@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.10.0
 
 ### macOS: give the embedded Python worker an 8 MiB stack
 
