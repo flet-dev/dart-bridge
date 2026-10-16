@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.11.0
+
+### Apple: raise minimum OS to iOS 15.0 and macOS 12.0
+
+The xcframework slices are now compiled and linked for iOS 15.0 (device and
+simulator) and macOS 12.0, up from iOS 13.0 and macOS 10.15, and each
+framework's `MinimumOSVersion` matches. These are the minimums Xcode 27
+supports, and they match Flutter 3.47 and Flet 1.1.0
+([flet-dev/flet#6940](https://github.com/flet-dev/flet/issues/6940)).
+
 ## 1.10.0
 
 ### macOS: give the embedded Python worker an 8 MiB stack
