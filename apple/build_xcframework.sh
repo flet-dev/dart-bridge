@@ -103,9 +103,9 @@ build_slice() {
   sdk_path=$(xcrun --sdk "$sdk" --show-sdk-path)
   local min_flag=""
   case "$sdk" in
-    iphoneos)        min_flag="-mios-version-min=13.0" ;;
-    iphonesimulator) min_flag="-mios-simulator-version-min=13.0" ;;
-    macosx)          min_flag="-mmacosx-version-min=10.15" ;;
+    iphoneos)        min_flag="-mios-version-min=$minos" ;;
+    iphonesimulator) min_flag="-mios-simulator-version-min=$minos" ;;
+    macosx)          min_flag="-mmacosx-version-min=$minos" ;;
   esac
 
   local arch_flags=()
@@ -162,9 +162,9 @@ build_slice() {
   lipo -info "$dylib" 2>/dev/null || true
 }
 
-build_slice iphoneos        iPhoneOS        13.0  flat      arm64
-build_slice iphonesimulator iPhoneSimulator 13.0  flat      arm64 x86_64
-build_slice macosx          MacOSX          10.15 versioned arm64 x86_64
+build_slice iphoneos        iPhoneOS        15.0 flat      arm64
+build_slice iphonesimulator iPhoneSimulator 15.0 flat      arm64 x86_64
+build_slice macosx          MacOSX          12.0 versioned arm64 x86_64
 
 echo "--- Creating xcframework ---"
 xcodebuild -create-xcframework \
