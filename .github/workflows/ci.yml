@@ -519,7 +519,7 @@ jobs:
     # build-apple-signed, never build-apple: the unsigned Apple job does not run
     # on tags at all, and depending on the signed job here means a signing
     # failure blocks the release rather than degrading it to an unsigned zip.
-    needs: [build-linux, build-windows, build-android, build-apple-signed]
+    needs: [compile-check, build-linux, build-windows, build-android, build-apple-signed]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
