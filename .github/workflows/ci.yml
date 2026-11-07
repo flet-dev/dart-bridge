@@ -51,17 +51,13 @@ jobs:
           cc -c -fPIC $WARN $INCLUDES -I src -DDART_SHARED_LIB src/serious_python_run.c -o out/serious_python_run.o
           # Full C API, as built for Android (PyConfig init path).
           cc -c -fPIC $WARN $INCLUDES -I src -DDART_SHARED_LIB -D__ANDROID__ src/serious_python_run.c -o out/serious_python_run_android.o
-          # Every Py* symbol the objects need must still be exported by libpython.
+          cc -c -fPIC $INCLUDES -I src -DDART_SHARED_LIB src/dart_api/dart_api_dl.c -o out/dart_api_dl.o
+          # Every Py* symbol the objects use must still be exported by libpython:
+          # link each variant into a shared library with no undefined symbols.
           LIBDIR=$(python3 -c "import sysconfig;print(sysconfig.get_config_var('LIBDIR'))")
-          LDLIB=$(python3 -c "import sysconfig;print(sysconfig.get_config_var('LDLIBRARY'))")
-          nm -D --defined-only "$LIBDIR/$LDLIB" | awk '{print $NF}' | sort -u > exported.txt
-          nm -u out/*.o | awk '{print $NF}' | grep '^_\?Py' | sed 's/^_//' | sort -u > needed.txt
-          MISSING=$(comm -23 needed.txt exported.txt)
-          if [ -n "$MISSING" ]; then
-            echo "::error::libpython ${{ matrix.python_version }} does not export: $MISSING"
-            exit 1
-          fi
-          wc -l needed.txt
+          LIBPY="-L$LIBDIR -lpython${{ matrix.python_version }}"
+          cc -shared -Wl,--no-undefined out/dart_bridge.o out/serious_python_run.o out/dart_api_dl.o $LIBPY -ldl -lpthread -o out/abi3.so
+          cc -shared -Wl,--no-undefined out/dart_bridge.o out/serious_python_run_android.o out/dart_api_dl.o $LIBPY -ldl -lpthread -o out/full_api.so
 
   build-linux:
     strategy:
