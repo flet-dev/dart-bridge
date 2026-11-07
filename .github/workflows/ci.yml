@@ -10,11 +10,59 @@ on:
     tags: ['v*.*.*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      python_build_run_id:
+        description: >
+          flet-dev/python-build Actions run to take Android Python headers and
+          libpython from, for minors the pinned release doesn't have yet.
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
 
 jobs:
+  # Compile both C sources against every supported minor's own headers, so a
+  # C-API removal or deprecation in a new CPython shows up here rather than on
+  # a device. The shipped desktop/Apple binaries are built against the 3.12
+  # abi3 headers below; this also covers the full-API path Android uses.
+  compile-check:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python_version: ['3.12', '3.13', '3.14', '3.15']
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: ${{ matrix.python_version }}
+      - name: Compile against Python ${{ matrix.python_version }} headers
+        run: |
+          set -euxo pipefail
+          INCLUDES=$(python3-config --includes)
+          WARN="-Wall -Werror=implicit-function-declaration -Werror=int-conversion -Werror=incompatible-pointer-types"
+          mkdir -p out
+          # abi3 (desktop / Apple): the sources define Py_LIMITED_API themselves.
+          cc -c -fPIC $WARN $INCLUDES -I src -DDART_SHARED_LIB src/dart_bridge.c -o out/dart_bridge.o
+          cc -c -fPIC $WARN $INCLUDES -I src -DDART_SHARED_LIB src/serious_python_run.c -o out/serious_python_run.o
+          # Full C API, as built for Android (PyConfig init path).
+          cc -c -fPIC $WARN $INCLUDES -I src -DDART_SHARED_LIB -D__ANDROID__ src/serious_python_run.c -o out/serious_python_run_android.o
+          # Every Py* symbol the objects need must still be exported by libpython.
+          LIBDIR=$(python3 -c "import sysconfig;print(sysconfig.get_config_var('LIBDIR'))")
+          LDLIB=$(python3 -c "import sysconfig;print(sysconfig.get_config_var('LDLIBRARY'))")
+          nm -D --defined-only "$LIBDIR/$LDLIB" | awk '{print $NF}' | sort -u > exported.txt
+          nm -u out/*.o | awk '{print $NF}' | grep '^_\?Py' | sed 's/^_//' | sort -u > needed.txt
+          MISSING=$(comm -23 needed.txt exported.txt)
+          if [ -n "$MISSING" ]; then
+            echo "::error::libpython ${{ matrix.python_version }} does not export: $MISSING"
+            exit 1
+          fi
+          wc -l needed.txt
+
   build-linux:
     strategy:
       fail-fast: false
@@ -221,12 +269,18 @@ jobs:
         # armeabi-v7a for every supported minor, so all ABIs build for all
         # versions.
         abi: [arm64-v8a, armeabi-v7a, x86_64]
-        python_version: ['3.12', '3.13', '3.14']
+        python_version: ['3.12', '3.13', '3.14', '3.15']
     env:
       # python-build release the Android Python headers/libpython come from.
       # Keep in sync with serious_python's `pythonReleaseDate` — both link
       # these binaries against the same date-keyed CPython artifacts.
-      PYTHON_BUILD_RELEASE_DATE: '20260629'
+      PYTHON_BUILD_RELEASE_DATE: '20261027'
+      # Minors the release above doesn't list yet come from this python-build
+      # Actions run instead (its `python-android-<full>` artifact). The fallback
+      # is the python-build `support-py3.15` run that built 3.15.2; drop it once
+      # a python-build release lists 3.15.
+      PYTHON_BUILD_RUN_ID: ${{ inputs.python_build_run_id || '42319861949' }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -243,9 +297,28 @@ jobs:
           # mobile-forge artifact — which carries armeabi-v7a for every minor.
           curl -fL -o manifest.json \
             "https://github.com/flet-dev/python-build/releases/download/${DATE}/manifest.json"
-          FULLVER=$(python3 -c "import json;print(json.load(open('manifest.json'))['pythons']['${VER}']['full_version'])")
-          curl -fL -o pamf.tar.gz \
-            "https://github.com/flet-dev/python-build/releases/download/${DATE}/python-android-mobile-forge-${FULLVER}.tar.gz"
+          FULLVER=$(python3 -c "import json;print(json.load(open('manifest.json'))['pythons'].get('${VER}', {}).get('full_version', ''))")
+          if [ -n "$FULLVER" ]; then
+            curl -fL -o pamf.tar.gz \
+              "https://github.com/flet-dev/python-build/releases/download/${DATE}/python-android-mobile-forge-${FULLVER}.tar.gz"
+          else
+            # Not released yet: take it from the python-build CI run instead.
+            test -n "$PYTHON_BUILD_RUN_ID" || {
+              echo "::error::python-build ${DATE} has no Python ${VER} and PYTHON_BUILD_RUN_ID is empty"
+              exit 1
+            }
+            ARTIFACT=$(gh api "repos/flet-dev/python-build/actions/runs/${PYTHON_BUILD_RUN_ID}/artifacts?per_page=100" \
+              --jq ".artifacts[].name | select(startswith(\"python-android-${VER}.\"))" | head -n1)
+            test -n "$ARTIFACT" || {
+              echo "::error::python-build run ${PYTHON_BUILD_RUN_ID} has no python-android-${VER}.* artifact"
+              exit 1
+            }
+            FULLVER=${ARTIFACT#python-android-}
+            echo "Python ${FULLVER} from python-build run ${PYTHON_BUILD_RUN_ID} (artifact ${ARTIFACT})"
+            gh run download "$PYTHON_BUILD_RUN_ID" --repo flet-dev/python-build \
+              --name "$ARTIFACT" --dir pb-run
+            mv "pb-run/python-android-mobile-forge-${FULLVER}.tar.gz" pamf.tar.gz
+          fi
           mkdir -p pydist
           # libpython3.so is the GNU linker script `INPUT(-lpython3.X)`;
           # extracting both lets ld follow the script to libpython3.X.so on
@@ -496,11 +569,14 @@ jobs:
             dist/libdart_bridge-android-arm64-v8a-py3.12.so
             dist/libdart_bridge-android-arm64-v8a-py3.13.so
             dist/libdart_bridge-android-arm64-v8a-py3.14.so
+            dist/libdart_bridge-android-arm64-v8a-py3.15.so
             dist/libdart_bridge-android-armeabi-v7a-py3.12.so
             dist/libdart_bridge-android-armeabi-v7a-py3.13.so
             dist/libdart_bridge-android-armeabi-v7a-py3.14.so
+            dist/libdart_bridge-android-armeabi-v7a-py3.15.so
             dist/libdart_bridge-android-x86_64-py3.12.so
             dist/libdart_bridge-android-x86_64-py3.13.so
             dist/libdart_bridge-android-x86_64-py3.14.so
+            dist/libdart_bridge-android-x86_64-py3.15.so
             dist/dart_bridge-apple.xcframework.zip
           fail_on_unmatched_files: true

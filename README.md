@@ -108,7 +108,7 @@ standalone ships `libpython3.so` as a GNU linker script that resolves to
 specific and we publish a binary per `(abi × python_version)`.
 
 armeabi-v7a (32-bit ARM) is published for every supported Python minor
-(3.12, 3.13, 3.14), matching python-build's per-minor `android_abis`.
+(3.12, 3.13, 3.14, 3.15), matching python-build's per-minor `android_abis`.
 
 Download URL pattern:
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.12.0
+
+### Android: binaries for Python 3.15
+
+`libdart_bridge-android-{arm64-v8a,armeabi-v7a,x86_64}-py3.15.so` are built
+and published next to the 3.12–3.14 ones. Desktop and Apple binaries are abi3
+and already load into 3.15.
+
+The C sources needed no change for 3.15. The C-API getters 3.15 removed
+(`Py_GetPath`, `Py_GetPythonHome`, …) are not used, and `Py_UTF8Mode`
+stays: 3.15 enables UTF-8 mode by default, but 3.12–3.14 still need it on
+Windows. A new `compile-check` CI job compiles both sources against every
+supported minor's headers, abi3 and full API, and fails if libpython stops
+exporting a symbol they use.
+
+CI takes Android headers and libpython from python-build release `20261027`,
+and from a python-build Actions run for minors that release doesn't list yet
+(`python_build_run_id` dispatch input).
+
 ## 1.11.0
 
 ### Apple: raise minimum OS to iOS 15.0 and macOS 12.0
